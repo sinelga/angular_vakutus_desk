@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+
+<html ng-app>
+  <head>
+    <meta charset="utf-8">
+       <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <link href="//netdna.bootstrapcdn.com/font-awesome/4.0.3/css/font-awesome.css" rel="stylesheet">
+    <link rel="stylesheet" href="//netdna.bootstrapcdn.com/bootstrap/3.1.1/css/bootstrap.min.css">
+    <title>Finance</title>
+    <link rel="stylesheet" href="dartapp.css">
+  </head>
+  <body ng-cloak>
+<div recipe-book>
+        
+  <div class="row">
+   <!--  <div class="col-md-2 leftbox navbar navbar-fixed-top"> -->
+       
+    <div class="col-md-2">
+        <div ng-switch="ctrl.navigationListLoaded" class='leftbox navbar navbar-fixed-top'>
+          <div ng-switch-when="true">
+            <ul class="nav" ng-repeat="navigation in ctrl.navigationList" ng-click="ctrl.selectNavigation(navigation)">
+              <li> <a>{{navigation.SubThemes}}</a></li>
+            </ul>  
+    
+        </div>
+      </div>
+   </div>
+ 
+    <div class="col-md-7 centralbox">
+    <script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- upbannerFinanceFIfi -->
+<ins class="adsbygoogle"
+     style="display:inline-block;width:468px;height:60px"
+     data-ad-client="ca-pub-4265026941264081"
+     data-ad-slot="5875261850"></ins>
+<script>
+(adsbygoogle = window.adsbygoogle || []).push({});
+</script>  
+         
+     <div ng-switch="ctrl.articlesListLoaded">
+     
+     <div ng-switch-when="true">
+     
+      <div ng-switch="ctrl.navigationListLoaded && !ctrl.articleSelected">
+        <div ng-switch-when="true">
+               <div ng-repeat="article in ctrl.articlesList" ng-click="ctrl.selectArticles(article)">
+                         
+                  <smallarticle articelobj="article"></smallarticle>
+                </div>
+                  
+        </div>
+        <div ng-switch-when="false">
+      
+          <bigarticle articelobj="ctrl.selectedArticles" ng-click="ctrl.closeBigArticle()"> </bigarticle>
+       
+      </div>
+      
+      </div>
+      </div>
+      <div ng-switch-when="false">
+      
+          <i class="fa fa-spinner fa-spin fa-5x"></i>Odotta...
+      
+      </div>
+      
+         
+    </div>
+    
+    </div>
+    
+     <div class="col-md-3 rightbox">
+ 
+
+<script async src="//pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>
+<!-- skyscraper120x600FI_fifinance -->
+<ins class="adsbygoogle"
+     style="display:inline-block;width:300px;height:600px"
+     data-ad-client="ca-pub-4265026941264081"
+     data-ad-slot="9526732259"></ins>
+<script>
+(adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+
+   
+ </div> 
+    
+  
+ 
+</div>
+</div>
+    <script src="packages/shadow_dom/shadow_dom.min.js"></script>
+    <script type="application/dart" src="dartapp.dart"></script>
+    <script src="packages/browser/dart.js"></script>
+     <script src="https://code.jquery.com/jquery.js"></script>
+  <script src="//netdna.bootstrapcdn.com/bootstrap/3.1.1/js/bootstrap.min.js"></script>
+  </body>
+</html>
