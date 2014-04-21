@@ -3,7 +3,7 @@ library smallarticle;
 import 'package:angular/angular.dart';
 import "package:dartapp/domains.dart";
 
-@NgComponent(
+@Component(
     selector: 'smallarticle',
     templateUrl: 'packages/dartapp/smallarticle/smallarticle_component.html',
     applyAuthorStyles: true,

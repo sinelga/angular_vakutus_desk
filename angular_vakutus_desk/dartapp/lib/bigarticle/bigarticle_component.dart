@@ -4,7 +4,7 @@ import 'package:angular/angular.dart';
 import "package:dartapp/domains.dart";
 
 
-@NgComponent(
+@Component(
     selector: 'bigarticle',
     templateUrl: 'packages/dartapp/bigarticle/bigarticle_component.html',
     applyAuthorStyles: true,

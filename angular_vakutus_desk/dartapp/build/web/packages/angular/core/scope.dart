@@ -1,8 +1,4 @@
-part of angular.core;
-
-NOT_IMPLEMENTED() {
-  throw new StateError('Not Implemented');
-}
+part of angular.core_internal;
 
 typedef EvalFunction0();
 typedef EvalFunction1(context);
@@ -81,7 +77,7 @@ class ScopeEvent {
  * triggers watch A. If the system does not stabilize in TTL iterations then
  * the digest is stopped and an exception is thrown.
  */
-@NgInjectableService()
+@Injectable()
 class ScopeDigestTTL {
   final int ttl;
   ScopeDigestTTL(): ttl = 5;
@@ -102,7 +98,8 @@ class ScopeLocals implements Map {
     _scope[name] = value;
   }
   dynamic operator [](String name) =>
-      (_locals.containsKey(name) ? _locals : _scope)[name];
+      // as Map needed to clear Dart2js warning
+      ((_locals.containsKey(name) ? _locals : _scope) as Map)[name];
 
   bool get isEmpty => _scope.isEmpty && _locals.isEmpty;
   bool get isNotEmpty => _scope.isNotEmpty || _locals.isNotEmpty;
@@ -192,23 +189,25 @@ class Scope {
   /**
    * Use [watch] to set up a watch in the [apply] cycle.
    *
-   * When [readOnly] is [:true:], the watch will be executed in the [flush]
-   * cycle. It should be used when the [reactionFn] does not change the model
-   * and allows the [digest] phase to converge faster.
+   * When [canChangeModel] is [:false:], the watch will be executed in the
+   * [flush] cycle. It should be used when the [reactionFn] does not change the
+   * model and allows speeding up the [digest] phase.
    *
-   * On the opposite, [readOnly] should be set to [:false:] if the [reactionFn]
-   * could change the model so that the watch is observed in the [digest] cycle.
+   * On the opposite, [canChangeModel] should be set to [:true:] if the
+   * [reactionFn] could change the model so that the watch is evaluated in the
+   * [digest] cycle.
    */
-  Watch watch(expression, ReactionFn reactionFn,
-              {context, FilterMap filters, bool readOnly: false}) {
+  Watch watch(String expression, ReactionFn reactionFn,  {context,
+      FormatterMap formatters, bool canChangeModel: true, bool collection: false}) {
     assert(isAttached);
-    assert(expression != null);
-    AST ast;
+    assert(expression is String);
+    assert(canChangeModel is bool);
+
     Watch watch;
     ReactionFn fn = reactionFn;
-    if (expression is AST) {
-      ast = expression;
-    } else if (expression is String) {
+    if (expression.isEmpty) {
+      expression = '""';
+    } else {
       if (expression.startsWith('::')) {
         expression = expression.substring(2);
         fn = (value, last) {
@@ -219,13 +218,16 @@ class Scope {
         };
       } else if (expression.startsWith(':')) {
         expression = expression.substring(1);
-        fn = (value, last) => value == null ? null : reactionFn(value, last);
+        fn = (value, last) {
+          if (value != null)  reactionFn(value, last);
+        };
       }
-      ast = rootScope._astParser(expression, context: context, filters: filters);
-    } else {
-      throw 'expressions must be String or AST got $expression.';
     }
-    WatchGroup group = readOnly ? _readOnlyGroup : _readWriteGroup;
+
+    AST ast = rootScope._astParser(expression, context: context,
+        formatters: formatters, collection: collection);
+
+    WatchGroup group = canChangeModel ? _readWriteGroup : _readOnlyGroup;
     return watch = group.watch(ast, fn);
   }
 
@@ -245,9 +247,6 @@ class Scope {
     return null;
   }
 
-  dynamic applyInZone([expression, Map locals]) =>
-      rootScope._zone.run(() => apply(expression, locals));
-
   dynamic apply([expression, Map locals]) {
     _assertInternalStateConsistency();
     rootScope._transitionState(null, RootScope.STATE_APPLY);
@@ -256,10 +255,9 @@ class Scope {
     } catch (e, s) {
       rootScope._exceptionHandler(e, s);
     } finally {
-      rootScope
-          .._transitionState(RootScope.STATE_APPLY, null)
-          ..digest()
-          ..flush();
+      rootScope.._transitionState(RootScope.STATE_APPLY, null)
+               ..digest()
+               ..flush();
     }
   }
 
@@ -356,45 +354,58 @@ class Scope {
 _mapEqual(Map a, Map b) => a.length == b.length &&
     a.keys.every((k) => b.containsKey(k) && a[k] == b[k]);
 
+/**
+ * ScopeStats collects and emits statistics about a [Scope].
+ *
+ * ScopeStats supports emitting the results. Result emission can be started or
+ * stopped at runtime. The result emission can is configured by supplying a
+ * [ScopeStatsEmitter].
+ */
+@Injectable()
 class ScopeStats {
-  bool report;
-  final nf = new NumberFormat.decimalPattern();
+  final fieldStopwatch = new AvgStopwatch();
+  final evalStopwatch = new AvgStopwatch();
+  final processStopwatch = new AvgStopwatch();
 
-  final digestFieldStopwatch = new AvgStopwatch();
-  final digestEvalStopwatch = new AvgStopwatch();
-  final digestProcessStopwatch = new AvgStopwatch();
-  int _digestLoopNo = 0;
+  List<int> _digestLoopTimes = [];
+  int _flushPhaseDuration = 0 ;
+  int _assertFlushPhaseDuration = 0;
 
-  final flushFieldStopwatch = new AvgStopwatch();
-  final flushEvalStopwatch = new AvgStopwatch();
-  final flushProcessStopwatch = new AvgStopwatch();
+  int _loopNo = 0;
+  ScopeStatsEmitter _emitter;
+  ScopeStatsConfig _config;
 
-  ScopeStats({this.report: false}) {
-    nf.maximumFractionDigits = 0;
-  }
+  /**
+   * Construct a new instance of ScopeStats.
+   */
+  ScopeStats(this._emitter, this._config);
 
   void digestStart() {
-    if (report) print('digest');
-    _digestStopwatchReset();
-    _digestLoopNo = 0;
+    _digestLoopTimes = [];
+    _stopwatchReset();
+    _loopNo = 0;
   }
 
-  _digestStopwatchReset() {
-    digestFieldStopwatch.reset();
-    digestEvalStopwatch.reset();
-    digestProcessStopwatch.reset();
+  int _allStagesDuration() {
+    return fieldStopwatch.elapsedMicroseconds +
+      evalStopwatch.elapsedMicroseconds +
+      processStopwatch.elapsedMicroseconds;
+  }
+
+  _stopwatchReset() {
+    fieldStopwatch.reset();
+    evalStopwatch.reset();
+    processStopwatch.reset();
   }
 
   void digestLoop(int changeCount) {
-    _digestLoopNo++;
-    if (report) print(this);
-    _digestStopwatchReset();
-  }
-
-  String _stat(AvgStopwatch s) {
-    return '${nf.format(s.count)}'
-           ' / ${nf.format(s.elapsedMicroseconds)} us'
-           ' = ${nf.format(s.ratePerMs)} #/ms';
+    _loopNo++;
+    if (_config.emit && _emitter != null) {
+      _emitter.emit(_loopNo.toString(), fieldStopwatch, evalStopwatch,
+        processStopwatch);
+    }
+    _digestLoopTimes.add( _allStagesDuration() );
+    _stopwatchReset();
   }
 
   void digestEnd() {
@@ -404,29 +415,104 @@ class ScopeStats {
   void domWriteEnd() {}
   void domReadStart() {}
   void domReadEnd() {}
-  void flushStart() {}
-  void flushEnd() {}
-  void flushAssertStart() {}
-  void flushAssertEnd() {}
+  void flushStart() {
+    _stopwatchReset();
+  }
+  void flushEnd() {
+    if (_config.emit && _emitter != null) {
+      _emitter.emit(RootScope.STATE_FLUSH, fieldStopwatch, evalStopwatch,
+        processStopwatch);
+    }
+    _flushPhaseDuration = _allStagesDuration();
+  }
+  void flushAssertStart() {
+    _stopwatchReset();
+  }
+  void flushAssertEnd() {
+    if (_config.emit && _emitter != null) {
+      _emitter.emit(RootScope.STATE_FLUSH_ASSERT, fieldStopwatch, evalStopwatch,
+        processStopwatch);
+    }
+    _assertFlushPhaseDuration = _allStagesDuration();
+  }
 
-  toString() =>
-      '    #$_digestLoopNo:'
-      'Field: ${_stat(digestFieldStopwatch)} '
-      'Eval: ${_stat(digestEvalStopwatch)} '
-      'Process: ${_stat(digestProcessStopwatch)}';
+  void cycleEnd() {
+  }
 }
 
+/**
+ * ScopeStatsEmitter is in charge of formatting the [ScopeStats] and outputting
+ * a message.
+ */
+@Injectable()
+class ScopeStatsEmitter {
+  static String _PAD_ = '                       ';
+  static String _HEADER_ = pad('APPLY', 7) + ':'+
+        pad('FIELD',    19) + pad('|', 20) +
+        pad('EVAL',     19) + pad('|', 20) +
+        pad('REACTION', 19) + pad('|', 20) +
+        pad('TOTAL',    10) + '\n';
+  final _nfDec = new NumberFormat("0.00", "en_US");
+  final _nfInt = new NumberFormat("0", "en_US");
 
+  static pad(String str, int size) => _PAD_.substring(0, max(size - str.length, 0)) + str;
+
+  _ms(num value) => '${pad(_nfDec.format(value), 9)} ms';
+  _us(num value) => _ms(value / 1000);
+  _tally(num value) => '${pad(_nfInt.format(value), 6)}';
+
+  /**
+   * Emit a message based on the phase and state of stopwatches.
+   */
+  void emit(String phaseOrLoopNo, AvgStopwatch fieldStopwatch,
+            AvgStopwatch evalStopwatch, AvgStopwatch processStopwatch) {
+    var total = fieldStopwatch.elapsedMicroseconds +
+                evalStopwatch.elapsedMicroseconds +
+                processStopwatch.elapsedMicroseconds;
+    print('${_formatPrefix(phaseOrLoopNo)} '
+          '${_stat(fieldStopwatch)} | '
+          '${_stat(evalStopwatch)} | '
+          '${_stat(processStopwatch)} | '
+          '${_ms(total/1000)}');
+  }
+
+  String _formatPrefix(String prefix) {
+    if (prefix == RootScope.STATE_FLUSH) return '  flush:';
+    if (prefix == RootScope.STATE_FLUSH_ASSERT) return ' assert:';
+
+    return (prefix == '1' ? _HEADER_ : '')  + '     #$prefix:';
+  }
+
+  String _stat(AvgStopwatch s) {
+    return '${_tally(s.count)} / ${_us(s.elapsedMicroseconds)} @(${_tally(s.ratePerMs)} #/ms)';
+  }
+}
+
+/**
+ * ScopeStatsConfig is used to modify behavior of [ScopeStats]. You can use this
+ * object to modify behavior at runtime too.
+ */
+class ScopeStatsConfig {
+  var emit = false;
+
+  ScopeStatsConfig();
+  ScopeStatsConfig.enabled() {
+    emit = true;
+  }
+}
+
+@Injectable()
 class RootScope extends Scope {
   static final STATE_APPLY = 'apply';
   static final STATE_DIGEST = 'digest';
   static final STATE_FLUSH = 'flush';
+  static final STATE_FLUSH_ASSERT = 'assert';
 
   final ExceptionHandler _exceptionHandler;
-  final AstParser _astParser;
+  final _AstParser _astParser;
   final Parser _parser;
   final ScopeDigestTTL _ttl;
-  final NgZone _zone;
+  final VmTurnZone _zone;
 
   _FunctionChain _runAsyncHead, _runAsyncTail;
   _FunctionChain _domWriteHead, _domWriteTail;
@@ -436,14 +522,19 @@ class RootScope extends Scope {
 
   String _state;
 
-  RootScope(Object context, this._astParser, this._parser,
-            GetterCache cacheGetter, FilterMap filterMap,
-            this._exceptionHandler, this._ttl, this._zone,
-            ScopeStats _scopeStats)
+  String get state => _state;
+
+  RootScope(Object context, Parser parser, FieldGetterFactory fieldGetterFactory,
+            FormatterMap filterMap, this._exceptionHandler, this._ttl, this._zone,
+            ScopeStats _scopeStats, ClosureMap closureMap)
       : _scopeStats = _scopeStats,
+        _parser = parser,
+        _astParser = new _AstParser(parser, closureMap),
         super(context, null, null,
-            new RootWatchGroup(new DirtyCheckingChangeDetector(cacheGetter), context),
-            new RootWatchGroup(new DirtyCheckingChangeDetector(cacheGetter), context),
+            new RootWatchGroup(fieldGetterFactory,
+                new DirtyCheckingChangeDetector(fieldGetterFactory), context),
+            new RootWatchGroup(fieldGetterFactory,
+                new DirtyCheckingChangeDetector(fieldGetterFactory), context),
             '',
             _scopeStats)
   {
@@ -481,9 +572,9 @@ class RootScope extends Scope {
         count = rootWatchGroup.detectChanges(
             exceptionHandler: _exceptionHandler,
             changeLog: changeLog,
-            fieldStopwatch: _scopeStats.digestFieldStopwatch,
-            evalStopwatch: _scopeStats.digestEvalStopwatch,
-            processStopwatch: _scopeStats.digestProcessStopwatch);
+            fieldStopwatch: _scopeStats.fieldStopwatch,
+            evalStopwatch: _scopeStats.evalStopwatch,
+            processStopwatch: _scopeStats.processStopwatch);
 
         if (digestTTL <= LOG_COUNT) {
           if (changeLog == null) {
@@ -527,9 +618,12 @@ class RootScope extends Scope {
         _domWriteTail = null;
         if (runObservers) {
           runObservers = false;
-          readOnlyGroup.detectChanges(exceptionHandler:_exceptionHandler);
+          readOnlyGroup.detectChanges(exceptionHandler:_exceptionHandler,
+              fieldStopwatch: _scopeStats.fieldStopwatch,
+              evalStopwatch: _scopeStats.evalStopwatch,
+              processStopwatch: _scopeStats.processStopwatch);
         }
-        if (_domReadHead != null) _stats.domWriteStart();
+        if (_domReadHead != null) _stats.domReadStart();
         while (_domReadHead != null) {
           try {
             _domReadHead.fn();
@@ -544,24 +638,30 @@ class RootScope extends Scope {
       _stats.flushEnd();
       assert((() {
         _stats.flushAssertStart();
-        var watchLog = [];
-        var observeLog = [];
+        var digestLog = [];
+        var flushLog = [];
         (_readWriteGroup as RootWatchGroup).detectChanges(
-            changeLog: (s, c, p) => watchLog.add('$s: $c <= $p'));
+            changeLog: (s, c, p) => digestLog.add('$s: $c <= $p'),
+            fieldStopwatch: _scopeStats.fieldStopwatch,
+            evalStopwatch: _scopeStats.evalStopwatch,
+            processStopwatch: _scopeStats.processStopwatch);
         (_readOnlyGroup as RootWatchGroup).detectChanges(
-            changeLog: (s, c, p) => watchLog.add('$s: $c <= $p'));
-        if (watchLog.isNotEmpty || observeLog.isNotEmpty) {
+            changeLog: (s, c, p) => flushLog.add('$s: $c <= $p'),
+            fieldStopwatch: _scopeStats.fieldStopwatch,
+            evalStopwatch: _scopeStats.evalStopwatch,
+            processStopwatch: _scopeStats.processStopwatch);
+        if (digestLog.isNotEmpty || flushLog.isNotEmpty) {
           throw 'Observer reaction functions should not change model. \n'
-                'These watch changes were detected: ${watchLog.join('; ')}\n'
-                'These observe changes were detected: ${observeLog.join('; ')}';
+                'These watch changes were detected: ${digestLog.join('; ')}\n'
+                'These observe changes were detected: ${flushLog.join('; ')}';
         }
         _stats.flushAssertEnd();
         return true;
       })());
     } finally {
+      _stats.cycleEnd();
       _transitionState(STATE_FLUSH, null);
     }
-
   }
 
   // QUEUES
@@ -684,9 +784,9 @@ class _Streams {
     return event;
   }
 
-  static ScopeStream on(Scope scope,
-                        ExceptionHandler _exceptionHandler,
-                        String name) {
+  static async.Stream<ScopeEvent> on(Scope scope,
+                                     ExceptionHandler _exceptionHandler,
+                                     String name) {
     _forceNewScopeStream(scope, _exceptionHandler);
     return scope._streams._get(scope, name);
   }
@@ -830,14 +930,19 @@ class ScopeStreamSubscription implements async.StreamSubscription<ScopeEvent> {
     return null;
   }
 
-  void onData(void handleData(ScopeEvent data)) => NOT_IMPLEMENTED();
-  void onError(Function handleError) => NOT_IMPLEMENTED();
-  void onDone(void handleDone()) => NOT_IMPLEMENTED();
-  void pause([async.Future resumeSignal]) => NOT_IMPLEMENTED();
-  void resume() => NOT_IMPLEMENTED();
-  bool get isPaused => NOT_IMPLEMENTED();
-  async.Future asFuture([var futureValue]) => NOT_IMPLEMENTED();
+  void onData(void handleData(ScopeEvent data)) => _NOT_IMPLEMENTED();
+  void onError(Function handleError) => _NOT_IMPLEMENTED();
+  void onDone(void handleDone()) => _NOT_IMPLEMENTED();
+  void pause([async.Future resumeSignal]) => _NOT_IMPLEMENTED();
+  void resume() => _NOT_IMPLEMENTED();
+  bool get isPaused => _NOT_IMPLEMENTED();
+  async.Future asFuture([var futureValue]) => _NOT_IMPLEMENTED();
 }
+
+_NOT_IMPLEMENTED() {
+  throw new StateError('Not Implemented');
+}
+
 
 class _FunctionChain {
   final Function fn;
@@ -848,37 +953,42 @@ class _FunctionChain {
   }
 }
 
-class AstParser {
+class _AstParser {
   final Parser _parser;
   int _id = 0;
-  ExpressionVisitor _visitor = new ExpressionVisitor();
+  final ExpressionVisitor _visitor;
 
-  AstParser(this._parser);
+  _AstParser(this._parser, ClosureMap closureMap)
+      : _visitor = new ExpressionVisitor(closureMap);
 
-  AST call(String exp, { FilterMap filters,
-                         bool collection: false,
-                         Object context: null }) {
-    _visitor.filters = filters;
+  AST call(String input, {FormatterMap formatters,
+                          bool collection: false,
+                          Object context: null }) {
+    _visitor.formatters = formatters;
     AST contextRef = _visitor.contextRef;
     try {
       if (context != null) {
         _visitor.contextRef = new ConstantAST(context, '#${_id++}');
       }
-      var ast = _parser(exp);
-      return collection ? _visitor.visitCollection(ast) : _visitor.visit(ast);
+      var exp = _parser(input);
+      return collection ? _visitor.visitCollection(exp) : _visitor.visit(exp);
     } finally {
       _visitor.contextRef = contextRef;
-      _visitor.filters = null;
+      _visitor.formatters = null;
     }
   }
 }
 
 class ExpressionVisitor implements Visitor {
   static final ContextReferenceAST scopeContextRef = new ContextReferenceAST();
+  final ClosureMap _closureMap;
   AST contextRef = scopeContextRef;
 
+
+  ExpressionVisitor(this._closureMap);
+
   AST ast;
-  FilterMap filters;
+  FormatterMap formatters;
 
   AST visit(Expression exp) {
     exp.accept(this);
@@ -896,11 +1006,24 @@ class ExpressionVisitor implements Visitor {
   List<AST> _toAst(List<Expression> expressions) =>
       expressions.map(_mapToAst).toList();
 
+  Map<Symbol, AST> _toAstMap(Map<String, Expression> expressions) {
+    if (expressions.isEmpty) return const {};
+    Map<Symbol, AST> result = new Map<Symbol, AST>();
+    expressions.forEach((String name, Expression expression) {
+      result[_closureMap.lookupSymbol(name)] = _mapToAst(expression);
+    });
+    return result;
+  }
+
   void visitCallScope(CallScope exp) {
-    ast = new MethodAST(contextRef, exp.name, _toAst(exp.arguments));
+    List<AST> positionals = _toAst(exp.arguments.positionals);
+    Map<Symbol, AST> named = _toAstMap(exp.arguments.named);
+    ast = new MethodAST(contextRef, exp.name, positionals, named);
   }
   void visitCallMember(CallMember exp) {
-    ast = new MethodAST(visit(exp.object), exp.name, _toAst(exp.arguments));
+    List<AST> positionals = _toAst(exp.arguments.positionals);
+    Map<Symbol, AST> named = _toAstMap(exp.arguments.named);
+    ast = new MethodAST(visit(exp.object), exp.name, positionals, named);
   }
   visitAccessScope(AccessScope exp) {
     ast = new FieldReadAST(contextRef, exp.name);
@@ -924,7 +1047,7 @@ class ExpressionVisitor implements Visitor {
                               visit(exp.no)]);
   }
   void visitAccessKeyed(AccessKeyed exp) {
-    ast = new PureFunctionAST('[]', _operation_bracket,
+    ast = new ClosureAST('[]', _operation_bracket,
                              [visit(exp.object), visit(exp.key)]);
   }
   void visitLiteralPrimitive(LiteralPrimitive exp) {
@@ -950,7 +1073,10 @@ class ExpressionVisitor implements Visitor {
   }
 
   void visitFilter(Filter exp) {
-    Function filterFunction = filters(exp.name);
+    if (formatters == null) {
+      throw new Exception("No formatters have been registered");
+    }
+    Function filterFunction = formatters(exp.name);
     List<AST> args = [visitCollection(exp.expression)];
     args.addAll(_toAst(exp.arguments).map((ast) => new CollectionAST(ast)));
     ast = new PureFunctionAST('|${exp.name}',
@@ -1065,7 +1191,7 @@ class _FilterWrapper extends FunctionApply {
     }
     var value = Function.apply(filterFn, args);
     if (value is Iterable) {
-      // Since filters are pure we can guarantee that this well never change.
+      // Since formatters are pure we can guarantee that this well never change.
       // By wrapping in UnmodifiableListView we can hint to the dirty checker
       // and short circuit the iterator.
       value = new UnmodifiableListView(value);

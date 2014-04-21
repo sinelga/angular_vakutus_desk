@@ -1,18 +1,24 @@
-part of angular.core.dom;
+part of angular.core.dom_internal;
 
 List<dom.Node> cloneElements(elements) {
   return elements.map((el) => el.clone(true)).toList();
 }
 
-typedef ApplyMapping(NodeAttrs attrs, Scope scope, Object dst,
-                     FilterMap filters, notify());
+class MappingParts {
+  final String attrName;
+  final String mode;
+  final String dstExpression;
+  final String originalValue;
+
+  const MappingParts(this.attrName, this.mode, this.dstExpression, this.originalValue);
+}
 
 class DirectiveRef {
   final dom.Node element;
   final Type type;
-  final NgAnnotation annotation;
+  final Directive annotation;
   final String value;
-  final mappings = new List<ApplyMapping>();
+  final mappings = new List<MappingParts>();
 
   DirectiveRef(this.element, this.type, this.annotation, [ this.value ]);
 
@@ -26,7 +32,7 @@ class DirectiveRef {
 }
 
 /**
- * Creates a child injector that allows loading new directives, filters and
+ * Creates a child injector that allows loading new directives, formatters and
  * services from the provided modules.
  */
 Injector forceNewDirectivesAndFilters(Injector injector, List<Module> modules) {
@@ -37,5 +43,5 @@ Injector forceNewDirectivesAndFilters(Injector injector, List<Module> modules) {
       }));
 
   return injector.createChild(modules,
-      forceNewInstances: [DirectiveMap, FilterMap]);
+      forceNewInstances: [DirectiveMap, FormatterMap]);
 }

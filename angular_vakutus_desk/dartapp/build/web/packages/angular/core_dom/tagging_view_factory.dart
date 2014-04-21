@@ -1,12 +1,11 @@
-part of angular.core.dom;
+part of angular.core.dom_internal;
 
 class TaggingViewFactory implements ViewFactory {
   final List<TaggedElementBinder> elementBinders;
   final List<dom.Node> templateNodes;
   final Profiler _perf;
-  final Expando _expando;
 
-  TaggingViewFactory(this.templateNodes, this.elementBinders, this._perf, this._expando);
+  TaggingViewFactory(this.templateNodes, this.elementBinders, this._perf);
 
   BoundViewFactory bind(Injector injector) =>
   new BoundViewFactory(this, injector);
@@ -42,8 +41,6 @@ class TaggingViewFactory implements ViewFactory {
   }
 
   View _link(View view, List<dom.Node> nodeList, List elementBinders, Injector rootInjector) {
-
-
     var directiveDefsByName = {};
 
     var elementBinderIndex = 0;
@@ -71,10 +68,10 @@ class TaggingViewFactory implements ViewFactory {
         }
       } else if (node.nodeType == 3 || node.nodeType == 8) {
         TaggedElementBinder tagged = elementBinders[elementBinderIndex];
-        assert(tagged.binder != null);
-
-        _bindTagged(tagged, rootInjector, elementBinders, view, node);
-
+        assert(tagged.binder != null || tagged.isTopLevel);
+        if (tagged.binder != null) {
+          _bindTagged(tagged, rootInjector, elementBinders, view, node);
+        }
         elementBinderIndex++;
       } else {
         throw "nodeType sadness ${node.nodeType}}";

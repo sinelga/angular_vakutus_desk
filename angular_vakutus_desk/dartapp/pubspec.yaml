@@ -1,8 +1,9 @@
 name: dartapp
 version: 0.0.1
-description: A sample web application
 dependencies:
-  angular: '>=0.9.10'
+  angular: 0.10.0
   shadow_dom: any
   jsonp: any
   intl: any
+transformers:
+- angular

@@ -1,4 +1,4 @@
-part of angular.core.dom;
+part of angular.core.dom_internal;
 
 class NodeCursor {
   final stack = [];
@@ -44,8 +44,6 @@ class NodeCursor {
   }
 
   NodeCursor remove() => new NodeCursor([elements.removeAt(index)..remove()]);
-
-  bool get isInstance => false;
 
   toString() => "[NodeCursor: $elements $index]";
 }

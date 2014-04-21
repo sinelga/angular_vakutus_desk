@@ -38,6 +38,7 @@ import 'dart:_foreign_helper' show
     JS_OPERATOR_AS_PREFIX,
     JS_OPERATOR_IS_PREFIX,
     JS_SIGNATURE_NAME,
+    JS_STRING_CONCAT,
     RAW_DART_FUNCTION_REF;
 
 import 'dart:_interceptors';
@@ -149,8 +150,7 @@ class JSInvocationMirror implements Invocation {
 
   List get positionalArguments {
     if (isGetter) return const [];
-    var argumentCount =
-        _arguments.length - _namedArgumentNames.length;
+    var argumentCount = _arguments.length - _namedArgumentNames.length;
     if (argumentCount == 0) return const [];
     var list = [];
     for (var index = 0 ; index < argumentCount ; index++) {
@@ -273,6 +273,7 @@ class CachedInvocation {
                    this.cachedInterceptor);
 
   bool get isNoSuchMethod => false;
+  bool get isGetterStub => JS("bool", "!!#.\$getterStub", jsFunction);
 
   /// Applies [jsFunction] to [victim] with [arguments].
   /// Users of this class must take care to check the arguments first.
@@ -297,6 +298,8 @@ class CachedCatchAllInvocation extends CachedInvocation {
                            Interceptor cachedInterceptor)
       : info = new ReflectionInfo(jsFunction),
         super(name, jsFunction, isIntercepted, cachedInterceptor);
+
+  bool get isGetterStub => false;
 
   invokeOn(Object victim, List arguments) {
     var receiver = victim;
@@ -349,6 +352,7 @@ class CachedNoSuchMethodInvocation {
   CachedNoSuchMethodInvocation(this.interceptor);
 
   bool get isNoSuchMethod => true;
+  bool get isGetterStub => false;
 
   invokeOn(Object victim, Invocation invocation) {
     var receiver = (interceptor == null) ? victim : interceptor;
@@ -771,8 +775,23 @@ class Primitives {
     return _fromCharCodeApply(charCodes);
   }
 
+  static String stringFromCharCode(charCode) {
+    if (0 <= charCode) {
+      if (charCode <= 0xffff) {
+        return JS('String', 'String.fromCharCode(#)', charCode);
+      }
+      if (charCode <= 0x10ffff) {
+        var bits = charCode - 0x10000;
+        var low = 0xDC00 | (bits & 0x3ff);
+        var high = 0xD800 | (bits >> 10);
+        return  JS('String', 'String.fromCharCode(#, #)', high, low);
+      }
+    }
+    throw new RangeError.range(charCode, 0, 0x10ffff);
+  }
+
   static String stringConcatUnchecked(String string1, String string2) {
-    return JS('String', r'# + #', string1, string2);
+    return JS_STRING_CONCAT(string1, string2);
   }
 
   static String getTimeZoneName(receiver) {
@@ -959,7 +978,8 @@ class Primitives {
       });
     }
 
-    String selectorName = 'call\$$argumentCount$names';
+    String selectorName =
+      '${JS_GET_NAME("CALL_PREFIX")}\$$argumentCount$names';
 
     return function.noSuchMethod(
         createUnmangledInvocationMirror(
@@ -1032,7 +1052,7 @@ class Primitives {
       arguments.addAll(positionalArguments);
     }
 
-    String selectorName = 'call\$$argumentCount';
+    String selectorName = '${JS_GET_NAME("CALL_PREFIX")}\$$argumentCount';
     var jsFunction = JS('var', '#[#]', function, selectorName);
     if (jsFunction == null) {
 
@@ -1184,6 +1204,7 @@ checkString(value) {
  * The code in [unwrapException] deals with getting the original Dart
  * object out of the wrapper again.
  */
+@NoInline()
 wrapException(ex) {
   if (ex == null) ex = new NullThrownError();
   var wrapper = JS('', 'new Error()');
@@ -1792,10 +1813,6 @@ int objectHashCode(var object) {
  * Called by generated code to build a map literal. [keyValuePairs] is
  * a list of key, value, key, value, ..., etc.
  */
-makeLiteralMap(keyValuePairs) {
-  return fillLiteralMap(keyValuePairs, new LinkedHashMap());
-}
-
 fillLiteralMap(keyValuePairs, Map result) {
   // TODO(johnniwinther): Use JSArray to optimize this code instead of calling
   // [getLength] and [getIndex].
@@ -3205,39 +3222,34 @@ String getIsolateAffinityTag(String name) {
   return JS('String', 'init.getIsolateTag(#)', name);
 }
 
-typedef Future<bool> LoadLibraryFunctionType();
+typedef Future<Null> LoadLibraryFunctionType();
 
 LoadLibraryFunctionType _loadLibraryWrapper(String loadId) {
   return () => loadDeferredLibrary(loadId);
 }
 
-final Map<String, Future<bool>> _loadedLibraries = <String, Future<bool>>{};
+final Map<String, Future<Null>> _loadedLibraries = <String, Future<Null>>{};
 
 Future<bool> loadDeferredLibrary(String loadId, [String uri]) {
-  List hunkNames = new List();
-  if (JS('bool', '\$.libraries_to_load[#] === undefined', loadId)) {
-    return new Future(() => false);
-  }
-  for (int index = 0;
-       index < JS('int', '\$.libraries_to_load[#].length', loadId);
-       ++index) {
-    hunkNames.add(JS('String', '\$.libraries_to_load[#][#]',
-                     loadId, index));
-  }
-  Iterable<Future<bool>> allLoads =
-      hunkNames.map((hunkName) => _loadHunk(hunkName, uri));
-  return Future.wait(allLoads).then((results) {
-    return results.any((x) => x);
+
+  List<List<String>> hunkLists = JS('JSExtendableArray|Null',
+      '\$.libraries_to_load[#]', loadId);
+  if (hunkLists == null) return new Future.value(null);
+
+  return Future.forEach(hunkLists, (hunkNames) {
+    Iterable<Future<Null>> allLoads =
+        hunkNames.map((hunkName) => _loadHunk(hunkName, uri));
+    return Future.wait(allLoads).then((_) => null);
   });
 }
 
-Future<bool> _loadHunk(String hunkName, String uri) {
+Future<Null> _loadHunk(String hunkName, String uri) {
   // TODO(ahe): Validate libraryName.  Kasper points out that you want
   // to be able to experiment with the effect of toggling @DeferLoad,
   // so perhaps we should silently ignore "bad" library names.
-  Future<bool> future = _loadedLibraries[hunkName];
+  Future<Null> future = _loadedLibraries[hunkName];
   if (future != null) {
-    return future.then((_) => false);
+    return future.then((_) => null);
   }
 
   if (uri == null) {
@@ -3249,7 +3261,7 @@ Future<bool> _loadHunk(String hunkName, String uri) {
   if (Primitives.isJsshell || Primitives.isD8) {
     // TODO(ahe): Move this code to a JavaScript command helper script that is
     // not included in generated output.
-    return _loadedLibraries[hunkName] = new Future<bool>(() {
+    return _loadedLibraries[hunkName] = new Future<Null>(() {
       try {
         // Create a new function to avoid getting access to current function
         // context.
@@ -3257,14 +3269,14 @@ Future<bool> _loadHunk(String hunkName, String uri) {
       } catch (error, stackTrace) {
         throw new DeferredLoadException("Loading $uri failed.");
       }
-      return true;
+      return null;
     });
   } else if (isWorker()) {
     // We are in a web worker. Load the code with an XMLHttpRequest.
-    return _loadedLibraries[hunkName] = new Future<bool>(() {
-      Completer completer = new Completer<bool>();
+    return _loadedLibraries[hunkName] = new Future<Null>(() {
+      Completer completer = new Completer<Null>();
       enterJsAsync();
-      Future<bool> leavingFuture = completer.future.whenComplete(() {
+      Future<Null> leavingFuture = completer.future.whenComplete(() {
         leaveJsAsync();
       });
 
@@ -3289,7 +3301,7 @@ Future<bool> _loadHunk(String hunkName, String uri) {
             new DeferredLoadException("Evaluating $uri failed."));
           return;
         }
-        completer.complete(true);
+        completer.complete(null);
       }, 1));
 
       var fail = convertDartClosureToJS((event) {
@@ -3303,15 +3315,15 @@ Future<bool> _loadHunk(String hunkName, String uri) {
     });
   }
   // We are in a dom-context.
-  return _loadedLibraries[hunkName] = new Future<bool>(() {
-    Completer completer = new Completer<bool>();
+  return _loadedLibraries[hunkName] = new Future<Null>(() {
+    Completer completer = new Completer<Null>();
     // Inject a script tag.
     var script = JS('', 'document.createElement("script")');
     JS('', '#.type = "text/javascript"', script);
     JS('', '#.src = #', script, uri);
     JS('', '#.addEventListener("load", #, false)',
        script, convertDartClosureToJS((event) {
-      completer.complete(true);
+      completer.complete(null);
     }, 1));
     JS('', '#.addEventListener("error", #, false)',
        script, convertDartClosureToJS((event) {

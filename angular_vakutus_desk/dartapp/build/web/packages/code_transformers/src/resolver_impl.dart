@@ -5,7 +5,10 @@
 library code_transformer.src.resolver_impl;
 
 import 'dart:async';
-import 'package:analyzer/src/generated/ast.dart';
+import 'package:analyzer/analyzer.dart' show parseCompilationUnit;
+import 'package:analyzer/src/generated/ast.dart' hide ConstantEvaluator;
+import 'package:analyzer/src/generated/constant.dart' show ConstantEvaluator,
+       EvaluationResult;
 import 'package:analyzer/src/generated/element.dart';
 import 'package:analyzer/src/generated/engine.dart';
 import 'package:analyzer/src/generated/java_io.dart';
@@ -13,6 +16,7 @@ import 'package:analyzer/src/generated/sdk.dart' show DartSdk;
 import 'package:analyzer/src/generated/sdk_io.dart' show DirectoryBasedDartSdk;
 import 'package:analyzer/src/generated/source.dart';
 import 'package:barback/barback.dart';
+import 'package:code_transformers/assets.dart';
 import 'package:path/path.dart' as native_path;
 import 'package:source_maps/refactor.dart';
 import 'package:source_maps/span.dart' show SourceFile, Span;
@@ -31,17 +35,15 @@ class ResolverImpl implements Resolver {
   final Map<AssetId, _AssetBasedSource> sources =
       <AssetId, _AssetBasedSource>{};
 
-  /// The Dart entry point file where parsing begins.
-  final AssetId entryPoint;
-
-  final AnalysisContext _context =
+  final InternalAnalysisContext _context =
       AnalysisEngine.instance.createAnalysisContext();
 
   /// Transform for which this is currently updating, or null when not updating.
   Transform _currentTransform;
 
-  /// The currently resolved library, or null if unresolved.
-  LibraryElement _entryLibrary;
+  /// The currently resolved entry libraries, or null if nothing is resolved.
+  List<LibraryElement> _entryLibraries;
+  Set<LibraryElement> _libraries;
 
   /// Future indicating when this resolver is done in the current phase.
   Future _lastPhaseComplete = new Future.value();
@@ -52,12 +54,9 @@ class ResolverImpl implements Resolver {
   /// Handler for all Dart SDK (dart:) sources.
   DirectoryBasedDartSdk _dartSdk;
 
-  /// Creates a resolver that will resolve the Dart code starting at
-  /// [entryPoint].
-  ///
-  /// [sdkDir] is the root directory of the Dart SDK, for resolving dart:
-  /// imports.
-  ResolverImpl(this.entryPoint, String sdkDir, {AnalysisOptions options}) {
+  /// Creates a resolver, where [sdkDir] is the root directory of the Dart SDK,
+  /// for resolving `dart:*` imports.
+  ResolverImpl(String sdkDir, {AnalysisOptions options}) {
     if (options == null) {
       options = new AnalysisOptionsImpl()
         ..cacheSize = 256 // # of sources to cache ASTs for.
@@ -69,21 +68,24 @@ class ResolverImpl implements Resolver {
     _dartSdk = new _DirectoryBasedDartSdkProxy(new JavaFile(sdkDir));
     _dartSdk.context.analysisOptions = options;
 
-    _context.sourceFactory = new SourceFactory.con2([
+    _context.sourceFactory = new SourceFactory([
         new DartUriResolverProxy(_dartSdk),
         new _AssetUriResolver(this)]);
   }
 
-  LibraryElement get entryLibrary => _entryLibrary;
+  LibraryElement getLibrary(AssetId assetId) {
+    var source = sources[assetId];
+    return source == null ? null : _context.computeLibraryElement(source);
+  }
 
-  Future<Resolver> resolve(Transform transform) {
+  Future<Resolver> resolve(Transform transform, [List<AssetId> entryPoints]) {
     // Can only have one resolve in progress at a time, so chain the current
     // resolution to be after the last one.
     var phaseComplete = new Completer();
-    var future = _lastPhaseComplete.then((_) {
+    var future = _lastPhaseComplete.whenComplete(() {
       _currentPhaseComplete = phaseComplete;
-
-      return _performResolve(transform);
+      return _performResolve(transform,
+        entryPoints == null ? [transform.primaryInput.id] : entryPoints);
     }).then((_) => this);
     // Advance the lastPhaseComplete to be done when this phase is all done.
     _lastPhaseComplete = phaseComplete.future;
@@ -97,11 +99,13 @@ class ResolverImpl implements Resolver {
     _currentPhaseComplete.complete(null);
     _currentPhaseComplete = null;
 
-    // Clear out the entry lib since it should not be referenced after release.
-    _entryLibrary = null;
+    // Clear out libraries since they should not be referenced after release.
+    _entryLibraries = null;
+    _libraries = null;
+    _currentTransform = null;
   }
 
-  Future _performResolve(Transform transform) {
+  Future _performResolve(Transform transform, List<AssetId> entryPoints) {
     if (_currentTransform != null) {
       throw new StateError('Cannot be accessed by concurrent transforms');
     }
@@ -111,6 +115,7 @@ class ResolverImpl implements Resolver {
     // and see if it changed, then walk all files accessed by it.
     var visited = new Set<AssetId>();
     var visiting = new FutureGroup();
+    var toUpdate = [];
 
     void processAsset(AssetId assetId) {
       visited.add(assetId);
@@ -121,38 +126,63 @@ class ResolverImpl implements Resolver {
           source = new _AssetBasedSource(assetId, this);
           sources[assetId] = source;
         }
-        source.updateContents(contents);
-
-        source.dependentAssets
-            .where((id) => !visited.contains(id))
+        source.updateDependencies(contents);
+        toUpdate.add(new _PendingUpdate(source, contents));
+        source.dependentAssets.where((id) => !visited.contains(id))
             .forEach(processAsset);
-
       }, onError: (e) {
-        _context.applyChanges(new ChangeSet()..removed(sources[assetId]));
-        sources.remove(assetId);
+        var source = sources[assetId];
+        if (source != null && source.exists()) {
+          _context.applyChanges(
+              new ChangeSet()..removedSource(source));
+          sources[assetId].updateContents(null);
+        }
       }));
     }
-    processAsset(entryPoint);
+    entryPoints.forEach(processAsset);
 
     // Once we have all asset sources updated with the new contents then
     // resolve everything.
     return visiting.future.then((_) {
       var changeSet = new ChangeSet();
-      var unreachableAssets = new Set.from(sources.keys).difference(visited);
+      toUpdate.forEach((pending) => pending.apply(changeSet));
+      var unreachableAssets = sources.keys.toSet()
+          .difference(visited)
+          .map((id) => sources[id]);
       for (var unreachable in unreachableAssets) {
-        changeSet.removed(sources[unreachable]);
-        sources.remove(unreachable);
+        changeSet.removedSource(unreachable);
+        unreachable.updateContents(null);
+        sources.remove(unreachable.assetId);
       }
 
       // Update the analyzer context with the latest sources
       _context.applyChanges(changeSet);
-      // Resolve the AST
-      _entryLibrary = _context.computeLibraryElement(sources[entryPoint]);
-      _currentTransform = null;
+      // Force resolve each entry point (the getter will ensure the library is
+      // computed first).
+      _entryLibraries = entryPoints.map((id) {
+        var source = sources[id];
+        if (source == null) return null;
+        return _context.computeLibraryElement(source);
+      }).toList();
     });
   }
 
-  Iterable<LibraryElement> get libraries => entryLibrary.visibleLibraries;
+  Iterable<LibraryElement> get libraries {
+    if (_libraries == null) {
+      // Note: we don't use `lib.visibleLibraries` because that excludes the
+      // exports seen in the entry libraries.
+      _libraries = new Set<LibraryElement>();
+      _entryLibraries.forEach(_collectLibraries);
+    }
+    return _libraries;
+  }
+
+  void _collectLibraries(LibraryElement lib) {
+    if (lib == null || _libraries.contains(lib)) return;
+    _libraries.add(lib);
+    lib.importedLibraries.forEach(_collectLibraries);
+    lib.exportedLibraries.forEach(_collectLibraries);
+  }
 
   LibraryElement getLibraryByName(String libraryName) =>
       libraries.firstWhere((l) => l.name == libraryName, orElse: () => null);
@@ -202,6 +232,12 @@ class ResolverImpl implements Resolver {
             orElse: () => null);
   }
 
+  EvaluationResult evaluateConstant(
+      LibraryElement library, Expression expression) {
+    return new ConstantEvaluator(library.source, _context.typeProvider)
+        .evaluate(expression);
+  }
+
   Uri getImportUri(LibraryElement lib, {AssetId from}) =>
       _getSourceUri(lib, from: from);
 
@@ -226,7 +262,7 @@ class ResolverImpl implements Resolver {
   }
 
   Span getSourceSpan(Element element) {
-    var sourceFile = _getSourceFile(element);
+    var sourceFile = getSourceFile(element);
     if (sourceFile == null) return null;
     return sourceFile.span(element.node.offset, element.node.end);
   }
@@ -234,24 +270,29 @@ class ResolverImpl implements Resolver {
   TextEditTransaction createTextEditTransaction(Element element) {
     if (element.source is! _AssetBasedSource) return null;
 
+    // Cannot edit unless there is an active transformer.
+    if (_currentTransform == null) return null;
+
     _AssetBasedSource source = element.source;
     // Cannot modify assets in other packages.
-    if (source.assetId.package != entryPoint.package) return null;
+    if (source.assetId.package != _currentTransform.primaryInput.id.package) {
+      return null;
+    }
 
-    var sourceFile = _getSourceFile(element);
+    var sourceFile = getSourceFile(element);
     if (sourceFile == null) return null;
 
-    return new TextEditTransaction(source.contents, sourceFile);
+    return new TextEditTransaction(source.rawContents, sourceFile);
   }
 
   /// Gets the SourceFile for the source of the element.
-  SourceFile _getSourceFile(Element element) {
+  SourceFile getSourceFile(Element element) {
     var assetId = getSourceAssetId(element);
     if (assetId == null) return null;
 
-    var importUri = _getSourceUri(element, from: entryPoint);
+    var importUri = _getSourceUri(element);
     var spanPath = importUri != null ? importUri.toString() : assetId.path;
-    return new SourceFile.text(spanPath, sources[assetId].contents);
+    return new SourceFile.text(spanPath, sources[assetId].rawContents);
   }
 }
 
@@ -275,35 +316,38 @@ class _AssetBasedSource extends Source {
 
   _AssetBasedSource(this.assetId, this._resolver);
 
+  /// Update the dependencies of this source. This parses [contents] but avoids
+  /// any analyzer resolution.
+  void updateDependencies(String contents) {
+    if (contents == _contents) return;
+    var unit = parseCompilationUnit(contents, suppressErrors: true);
+    _dependentAssets = unit.directives
+        .where((d) => (d is ImportDirective || d is PartDirective ||
+            d is ExportDirective))
+        .map((d) => _resolve(assetId, d.uri.stringValue, _logger,
+              _getSpan(d, contents)))
+        .where((id) => id != null).toSet();
+  }
+
   /// Update the contents of this file with [contents].
   ///
   /// Returns true if the contents of this asset have changed.
   bool updateContents(String contents) {
     if (contents == _contents) return false;
-    var added = _contents == null;
     _contents = contents;
     ++_revision;
-    // Invalidate the imports so we only parse the AST when needed.
-    _dependentAssets = null;
-
-    if (added) {
-      _resolver._context.applyChanges(new ChangeSet()..added(this));
-    } else {
-      _resolver._context.applyChanges(new ChangeSet()..changed(this));
-    }
-
-    var compilationUnit = _resolver._context.parseCompilationUnit(this);
-    _dependentAssets = compilationUnit.directives
-        .where((d) => (d is ImportDirective || d is PartDirective ||
-            d is ExportDirective))
-        .map((d) => _resolve(assetId, d.uri.stringValue,
-            _logger, _getSpan(d)))
-        .where((id) => id != null).toSet();
     return true;
   }
 
   /// Contents of the file.
-  String get contents => _contents;
+  TimestampedData<String> get contents {
+    if (!exists()) throw new StateError('$assetId does not exist');
+
+    return new TimestampedData<String>(modificationStamp, _contents);
+  }
+
+  /// Contents of the file.
+  String get rawContents => _contents;
 
   /// Logger for the current transform.
   ///
@@ -313,15 +357,15 @@ class _AssetBasedSource extends Source {
   /// Gets all imports/parts/exports which resolve to assets (non-Dart files).
   Iterable<AssetId> get dependentAssets => _dependentAssets;
 
-  bool exists() => true;
+  bool exists() => _contents != null;
 
   bool operator ==(Object other) =>
       other is _AssetBasedSource && assetId == other.assetId;
 
   int get hashCode => assetId.hashCode;
 
-  void getContents(Source_ContentReceiver receiver) {
-    receiver.accept(contents, modificationStamp);
+  void getContentsToReceiver(Source_ContentReceiver receiver) {
+    receiver.accept(rawContents, modificationStamp);
   }
 
   String get encoding =>
@@ -353,13 +397,13 @@ class _AssetBasedSource extends Source {
   }
 
   /// For logging errors.
-  Span _getSpan(ASTNode node) => _sourceFile.span(node.offset, node.end);
+  Span _getSpan(AstNode node, [String contents]) =>
+      _getSourceFile(contents).span(node.offset, node.end);
   /// For logging errors.
-  SourceFile get _sourceFile {
-    var uri = getSourceUri(_resolver.entryPoint);
+  SourceFile _getSourceFile([String contents]) {
+    var uri = getSourceUri();
     var path = uri != null ? uri.toString() : assetId.path;
-
-    return new SourceFile.text(path, contents);
+    return new SourceFile.text(path, contents != null ? contents : rawContents);
   }
 
   /// Gets a URI which would be appropriate for importing this file.
@@ -384,17 +428,23 @@ class _AssetUriResolver implements UriResolver {
   final ResolverImpl _resolver;
   _AssetUriResolver(this._resolver);
 
-  Source resolveAbsolute(ContentCache contentCache, Uri uri) {
+  Source resolveAbsolute(Uri uri) {
     var assetId = _resolve(null, uri.toString(), logger, null);
+    if (assetId == null) {
+      logger.error('Unable to resolve asset ID for "$uri"');
+      return null;
+    }
     var source = _resolver.sources[assetId];
-    /// All resolved assets should be available by this point.
+    // Analyzer expects that sources which are referenced but do not exist yet
+    // still exist, so just make an empty source.
     if (source == null) {
-      logger.error('Unable to find asset for "$uri"');
+      source = new _AssetBasedSource(assetId, _resolver);
+      _resolver.sources[assetId] = source;
     }
     return source;
   }
 
-  Source fromEncoding(ContentCache contentCache, UriKind kind, Uri uri) =>
+  Source fromEncoding(UriKind kind, Uri uri) =>
       throw new UnsupportedError('fromEncoding is not supported');
 
   Uri restoreAbsolute(Source source) =>
@@ -423,12 +473,12 @@ class DartUriResolverProxy implements DartUriResolver {
   DartUriResolverProxy(DirectoryBasedDartSdk sdk) :
       _proxy = new DartUriResolver(sdk);
 
-  Source resolveAbsolute(ContentCache contentCache, Uri uri) =>
-    _DartSourceProxy.wrap(_proxy.resolveAbsolute(contentCache, uri), uri);
+  Source resolveAbsolute(Uri uri) =>
+    _DartSourceProxy.wrap(_proxy.resolveAbsolute(uri), uri);
 
   DartSdk get dartSdk => _proxy.dartSdk;
 
-  Source fromEncoding(ContentCache contentCache, UriKind kind, Uri uri) =>
+  Source fromEncoding(UriKind kind, Uri uri) =>
       throw new UnsupportedError('fromEncoding is not supported');
 
   Uri restoreAbsolute(Source source) =>
@@ -468,9 +518,7 @@ class _DartSourceProxy implements Source {
 
   int get hashCode => _proxy.hashCode;
 
-  void getContents(Source_ContentReceiver receiver) {
-    _proxy.getContents(receiver);
-  }
+  TimestampedData<String> get contents => _proxy.contents;
 
   String get encoding => _proxy.encoding;
 
@@ -507,14 +555,7 @@ AssetId _resolve(AssetId source, String url, TransformLogger logger,
   // Dart SDK libraries do not have assets.
   if (uri.scheme == 'dart') return null;
 
-  if (uri.host != '' || uri.scheme != '' || path.isAbsolute(url)) {
-    logger.error('absolute paths not allowed: "$url"', span: span);
-    return null;
-  }
-
-  var targetPath = path.normalize(
-      path.join(path.dirname(source.path), url));
-  return new AssetId(source.package, targetPath);
+  return uriToAssetId(source, url, logger, span);
 }
 
 
@@ -564,11 +605,31 @@ class FutureGroup<E> {
   }
 
   /**
-   * A Future that complets with a List of the values from all the added
+   * A Future that completes with a List of the values from all the added
    * tasks, when they have all completed.
    *
    * If any task fails, this Future will receive the error. Only the first
    * error will be sent to the Future.
    */
   Future<List<E>> get future => _completer.future;
+}
+
+/// A pending update to notify the resolver that a [Source] has been added or
+/// changed. This is used by the `_performResolve` algorithm above to apply all
+/// changes after it first discovers the transitive closure of files that are
+/// reachable from the sources.
+class _PendingUpdate {
+  _AssetBasedSource source;
+  String content;
+
+  _PendingUpdate(this.source, this.content);
+
+  void apply(ChangeSet changeSet) {
+    if (!source.updateContents(content)) return;
+    if (source._revision == 1 && source._contents != null) {
+      changeSet.addedSource(source);
+    } else {
+      changeSet.changedSource(source);
+    }
+  }
 }

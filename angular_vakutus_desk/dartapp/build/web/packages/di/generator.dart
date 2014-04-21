@@ -13,8 +13,10 @@ import 'dart:io';
 
 const String PACKAGE_PREFIX = 'package:';
 const String DART_PACKAGE_PREFIX = 'dart:';
+const List<String> _DEFAULT_INJECTABLE_ANNOTATIONS =
+    const ['di.annotations.Injectable'];
 
-main(args) {
+main(List<String> args) {
   if (args.length < 4) {
     print('Usage: generator path_to_sdk file_to_resolve annotations output [package_roots+]');
     exit(0);
@@ -22,7 +24,8 @@ main(args) {
 
   var pathToSdk = args[0];
   var entryPoint = args[1];
-  var classAnnotations = args[2].split(',');
+  var classAnnotations = args[2].split(',')
+      ..addAll(_DEFAULT_INJECTABLE_ANNOTATIONS);
   var output = args[3];
   var packageRoots = (args.length < 5) ? [Platform.packageRoot] : args.sublist(4);
 
@@ -269,7 +272,7 @@ class SourceCrawler {
     var packageUriResolver =
         new PackageUriResolver(packageRoots.map(
             (pr) => new JavaFile.fromUri(new Uri.file(pr))).toList());
-    context.sourceFactory = new SourceFactory.con2([
+    context.sourceFactory = new SourceFactory([
       new DartUriResolver(sdk),
       new FileUriResolver(),
       packageUriResolver
@@ -279,18 +282,16 @@ class SourceCrawler {
     var entryPointImport;
     if (entryPoint.startsWith(PACKAGE_PREFIX)) {
       entryPointFile = new JavaFile(packageUriResolver
-          .resolveAbsolute(context.sourceFactory.contentCache,
-              Uri.parse(entryPoint)).toString());
+          .resolveAbsolute(Uri.parse(entryPoint)).toString());
       entryPointImport = entryPoint;
     } else {
       entryPointFile = new JavaFile(entryPoint);
       entryPointImport = entryPointFile.getAbsolutePath();
     }
 
-    Source source = new FileBasedSource.con1(
-        context.sourceFactory.contentCache, entryPointFile);
+    Source source = new FileBasedSource.con1(entryPointFile);
     ChangeSet changeSet = new ChangeSet();
-    changeSet.added(source);
+    changeSet.addedSource(source);
     context.applyChanges(changeSet);
     LibraryElement rootLib = context.computeLibraryElement(source);
     CompilationUnit resolvedUnit =

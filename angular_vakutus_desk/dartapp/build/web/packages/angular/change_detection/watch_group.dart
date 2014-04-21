@@ -1,18 +1,17 @@
 library angular.watch_group;
 
-import 'dart:mirrors';
 import 'package:angular/change_detection/change_detection.dart';
 
 part 'linked_list.dart';
 part 'ast.dart';
 part 'prototype_map.dart';
 
-typedef ReactionFn(value, previousValue);
-typedef ChangeLog(String expression, current, previous);
+typedef void ReactionFn(value, previousValue);
+typedef void ChangeLog(String expression, current, previous);
 
 /**
  * Extend this class if you wish to pretend to be a function, but you don't know
- * number of arguments with which the function will get called.
+ * number of arguments with which the function will get called with.
  */
 abstract class FunctionApply {
   // dartbug.com/16401
@@ -184,10 +183,13 @@ class WatchGroup implements _EvalWatchList, _WatchGroupList {
    * - [fn] function to evaluate.
    * - [argsAST] list of [AST]es which represent arguments passed to function.
    * - [expression] normalized expression used for caching.
+   * - [isPure] A pure function is one which holds no internal state. This implies that the
+   *   function is idempotent.
    */
   _EvalWatchRecord addFunctionWatch(/* dartbug.com/16401 Function */ fn, List<AST> argsAST,
-                                    String expression) =>
-      _addEvalWatch(null, fn, null, argsAST, expression);
+                                    Map<Symbol, AST> namedArgsAST,
+                                    String expression, bool isPure) =>
+      _addEvalWatch(null, fn, null, argsAST, namedArgsAST, expression, isPure);
 
   /**
    * Watch a method [name]ed represented by an [expression].
@@ -198,16 +200,20 @@ class WatchGroup implements _EvalWatchList, _WatchGroupList {
    * - [expression] normalized expression used for caching.
    */
   _EvalWatchRecord addMethodWatch(AST lhs, String name, List<AST> argsAST,
+                                  Map<Symbol, AST> namedArgsAST,
                                   String expression) =>
-      _addEvalWatch(lhs, null, name, argsAST, expression);
+      _addEvalWatch(lhs, null, name, argsAST, namedArgsAST, expression, false);
 
 
 
   _EvalWatchRecord _addEvalWatch(AST lhsAST, /* dartbug.com/16401 Function */ fn, String name,
-                                 List<AST> argsAST, String expression) {
+                                 List<AST> argsAST,
+                                 Map<Symbol, AST> namedArgsAST,
+                                 String expression, bool isPure) {
     _InvokeHandler invokeHandler = new _InvokeHandler(this, expression);
-    var evalWatchRecord = new _EvalWatchRecord(this, invokeHandler, fn, name,
-        argsAST.length);
+    var evalWatchRecord = new _EvalWatchRecord(
+        _rootGroup._fieldGetterFactory, this, invokeHandler, fn, name,
+        argsAST.length, isPure);
     invokeHandler.watchRecord = evalWatchRecord;
 
     if (lhsAST != null) {
@@ -218,15 +224,24 @@ class WatchGroup implements _EvalWatchList, _WatchGroupList {
     }
 
     // Convert the args from AST to WatchRecords
-    var i = 0;
-    argsAST.map((ast) =>
-        _cache.putIfAbsent(ast.expression, () => ast.setupWatch(this)))
-            .forEach((WatchRecord<_Handler> record) {
-              var argHandler = new _ArgHandler(this, evalWatchRecord, i++);
-              _ArgHandlerList._add(invokeHandler, argHandler);
-              record.handler.addForwardHandler(argHandler);
-              argHandler.acceptValue(record.currentValue);
-            });
+    Iterable<WatchRecord<_Handler>> records = argsAST.map((ast) =>
+        _cache.putIfAbsent(ast.expression, () => ast.setupWatch(this)));
+    int i = 0;
+    records.forEach((WatchRecord<_Handler> record) {
+      _ArgHandler handler = new _PositionalArgHandler(this, evalWatchRecord, i++);
+      _ArgHandlerList._add(invokeHandler, handler);
+      record.handler.addForwardHandler(handler);
+      handler.acceptValue(record.currentValue);
+    });
+
+    namedArgsAST.forEach((Symbol name, AST ast) {
+      WatchRecord<_Handler> record = _cache.putIfAbsent(ast.expression,
+          () => ast.setupWatch(this));
+      _ArgHandler handler = new _NamedArgHandler(this, evalWatchRecord, name);
+      _ArgHandlerList._add(invokeHandler, handler);
+      record.handler.addForwardHandler(handler);
+      handler.acceptValue(record.currentValue);
+    });
 
     // Must be done last
     _EvalWatchList._add(this, evalWatchRecord);
@@ -327,7 +342,7 @@ class WatchGroup implements _EvalWatchList, _WatchGroupList {
     lines.add('WatchGroup[$id](watches: ${watches.join(', ')})');
     var childGroup = _watchGroupHead;
     while (childGroup != null) {
-      lines.add('  ' + childGroup.toString().split('\n').join('\n  '));
+      lines.add('  ' + childGroup.toString().replace('\n', '\n  '));
       childGroup = childGroup._nextWatchGroup;
     }
     return lines.join('\n');
@@ -338,6 +353,7 @@ class WatchGroup implements _EvalWatchList, _WatchGroupList {
  * [RootWatchGroup]
  */
 class RootWatchGroup extends WatchGroup {
+  final FieldGetterFactory _fieldGetterFactory;
   Watch _dirtyWatchHead, _dirtyWatchTail;
 
   /**
@@ -350,8 +366,10 @@ class RootWatchGroup extends WatchGroup {
   int _removeCount = 0;
 
 
-  RootWatchGroup(ChangeDetector changeDetector, Object context):
-      super._root(changeDetector, context);
+  RootWatchGroup(this._fieldGetterFactory,
+                 ChangeDetector changeDetector,
+                 Object context)
+      : super._root(changeDetector, context);
 
   RootWatchGroup get _rootGroup => this;
 
@@ -409,7 +427,7 @@ class RootWatchGroup extends WatchGroup {
     // We need to call reaction functions asynchronously. This processes the
     // asynchronous reaction function queue.
     int count = 0;
-    if (processStopwatch != null) processStopwatch.stop();
+    if (processStopwatch != null) processStopwatch.start();
     Watch dirtyWatch = _dirtyWatchHead;
     _dirtyWatchHead = null;
     RootWatchGroup root = _rootGroup;
@@ -534,7 +552,8 @@ abstract class _Handler implements _LinkedList, _LinkedListItem, _WatchList {
     forwardToHandler.forwardingHandler = this;
   }
 
-  void release() {
+  /// Return true if release has happened
+  bool release() {
     if (_WatchList._isEmpty(this) && _LinkedList._isEmpty(this)) {
       _releaseWatch();
       // Remove ourselves from cache, or else new registrations will go to us,
@@ -549,6 +568,9 @@ abstract class _Handler implements _LinkedList, _LinkedListItem, _WatchList {
 
       // We can remove ourselves
       assert((_next = _previous = this) == this); // mark ourselves as detached
+      return true;
+    } else {
+      return false;
     }
   }
 
@@ -577,7 +599,7 @@ abstract class _Handler implements _LinkedList, _LinkedListItem, _WatchList {
 }
 
 class _ConstantHandler extends _Handler {
-  _ConstantHandler(WatchGroup watchGroup, String expression, dynamic constantValue)
+  _ConstantHandler(WatchGroup watchGroup, String expression, constantValue)
       : super(watchGroup, expression)
   {
     watchRecord = new _EvalWatchRecord.constant(this, constantValue);
@@ -615,22 +637,39 @@ class _CollectionHandler extends _Handler {
   }
 }
 
-class _ArgHandler extends _Handler {
+abstract class _ArgHandler extends _Handler {
   _ArgHandler _previousArgHandler, _nextArgHandler;
 
   // TODO(misko): Why do we override parent?
   final _EvalWatchRecord watchRecord;
-  final int index;
+  _ArgHandler(WatchGroup watchGrp, String expression, this.watchRecord)
+      : super(watchGrp, expression);
 
   _releaseWatch() => null;
+}
 
-  _ArgHandler(WatchGroup watchGrp, this.watchRecord, int index)
-      : index = index,
-        super(watchGrp, 'arg[$index]');
+class _PositionalArgHandler extends _ArgHandler {
+  final int index;
+  _PositionalArgHandler(WatchGroup watchGrp, _EvalWatchRecord record, int index)
+      : this.index = index,
+        super(watchGrp, 'arg[$index]', record);
 
   void acceptValue(object) {
     watchRecord.dirtyArgs = true;
     watchRecord.args[index] = object;
+  }
+}
+
+class _NamedArgHandler extends _ArgHandler {
+  final Symbol name;
+
+  _NamedArgHandler(WatchGroup watchGrp, _EvalWatchRecord record, Symbol name)
+      : this.name = name,
+        super(watchGrp, 'namedArg[$name]', record);
+
+  void acceptValue(object) {
+    watchRecord.dirtyArgs = true;
+    watchRecord.namedArgs[name] = object;
   }
 }
 
@@ -644,55 +683,58 @@ class _InvokeHandler extends _Handler implements _ArgHandlerList {
     watchRecord.object = object;
   }
 
-  void onChange(Record<_Handler> record) {
-    super.onChange(record);
-  }
-
   void _releaseWatch() {
     (watchRecord as _EvalWatchRecord).remove();
   }
 
-  void release() {
-    super.release();
-    _ArgHandler current = _argHandlerHead;
-    while (current != null) {
-      current.release();
-      current = current._nextArgHandler;
+  bool release() {
+    if (super.release()) {
+      _ArgHandler current = _argHandlerHead;
+      while (current != null) {
+        current.release();
+        current = current._nextArgHandler;
+      }
+      return true;
+    } else {
+      return false;
     }
   }
 }
 
 
 class _EvalWatchRecord implements WatchRecord<_Handler>, Record<_Handler> {
-  static const int _MODE_DELETED_        = -1;
-  static const int _MODE_MARKER_         = 0;
-  static const int _MODE_FUNCTION_       = 1;
-  static const int _MODE_FUNCTION_APPLY_ = 2;
-  static const int _MODE_NULL_           = 3;
-  static const int _MODE_FIELD_CLOSURE_  = 4;
-  static const int _MODE_MAP_CLOSURE_    = 5;
-  static const int _MODE_METHOD_         = 6;
+  static const int _MODE_INVALID_             = -2;
+  static const int _MODE_DELETED_             = -1;
+  static const int _MODE_MARKER_              = 0;
+  static const int _MODE_PURE_FUNCTION_       = 1;
+  static const int _MODE_FUNCTION_            = 2;
+  static const int _MODE_PURE_FUNCTION_APPLY_ = 3;
+  static const int _MODE_NULL_                = 4;
+  static const int _MODE_FIELD_CLOSURE_       = 5;
+  static const int _MODE_MAP_CLOSURE_         = 6;
+  static const int _MODE_METHOD_              = 7;
+  static const int _MODE_METHOD_INVOKE_       = 8;
   WatchGroup watchGrp;
   final _Handler handler;
   final List args;
-  final Symbol symbol;
+  final Map<Symbol, dynamic> namedArgs =  new Map<Symbol, dynamic>();
   final String name;
   int mode;
   /* dartbug.com/16401 Function*/ var fn;
-  InstanceMirror _instanceMirror;
+  FieldGetterFactory _fieldGetterFactory;
   bool dirtyArgs = true;
 
   dynamic currentValue, previousValue, _object;
   _EvalWatchRecord _prevEvalWatch, _nextEvalWatch;
 
-  _EvalWatchRecord(this.watchGrp, this.handler, this.fn, name, int arity)
-      : args = new List(arity),
-        name = name,
-        symbol = name == null ? null : new Symbol(name) {
+  _EvalWatchRecord(this._fieldGetterFactory, this.watchGrp, this.handler,
+                   this.fn, this.name, int arity, bool pure)
+      : args = new List(arity)
+  {
     if (fn is FunctionApply) {
-      mode = _MODE_FUNCTION_APPLY_;
+      mode = pure ? _MODE_PURE_FUNCTION_APPLY_: _MODE_INVALID_;
     } else if (fn is Function) {
-      mode = _MODE_FUNCTION_;
+      mode = pure ? _MODE_PURE_FUNCTION_ : _MODE_FUNCTION_;
     } else {
       mode = _MODE_NULL_;
     }
@@ -700,21 +742,21 @@ class _EvalWatchRecord implements WatchRecord<_Handler>, Record<_Handler> {
 
   _EvalWatchRecord.marker()
       : mode = _MODE_MARKER_,
+        _fieldGetterFactory = null,
         watchGrp = null,
         handler = null,
         args = null,
         fn = null,
-        symbol = null,
         name = null;
 
   _EvalWatchRecord.constant(_Handler handler, dynamic constantValue)
       : mode = _MODE_MARKER_,
+        _fieldGetterFactory = null,
         handler = handler,
         currentValue = constantValue,
         watchGrp = null,
         args = null,
         fn = null,
-        symbol = null,
         name = null;
 
   get field => '()';
@@ -725,8 +767,8 @@ class _EvalWatchRecord implements WatchRecord<_Handler>, Record<_Handler> {
     assert(mode != _MODE_DELETED_);
     assert(mode != _MODE_MARKER_);
     assert(mode != _MODE_FUNCTION_);
-    assert(mode != _MODE_FUNCTION_APPLY_);
-    assert(symbol != null);
+    assert(mode != _MODE_PURE_FUNCTION_);
+    assert(mode != _MODE_PURE_FUNCTION_APPLY_);
     _object = value;
 
     if (value == null) {
@@ -735,10 +777,13 @@ class _EvalWatchRecord implements WatchRecord<_Handler>, Record<_Handler> {
       if (value is Map) {
         mode =  _MODE_MAP_CLOSURE_;
       } else {
-        _instanceMirror = reflect(value);
-        mode = _hasMethod(_instanceMirror, symbol)
-            ? _MODE_METHOD_
-            : _MODE_FIELD_CLOSURE_;
+        if (_fieldGetterFactory.isMethod(value, name)) {
+          mode = _fieldGetterFactory.isMethodInvoke ? _MODE_METHOD_INVOKE_ : _MODE_METHOD_;
+          fn = _fieldGetterFactory.method(value, name);
+        } else {
+          mode = _MODE_FIELD_CLOSURE_;
+          fn = _fieldGetterFactory.getter(value, name);
+        }
       }
     }
   }
@@ -749,26 +794,33 @@ class _EvalWatchRecord implements WatchRecord<_Handler>, Record<_Handler> {
       case _MODE_MARKER_:
       case _MODE_NULL_:
         return false;
-      case _MODE_FUNCTION_:
+      case _MODE_PURE_FUNCTION_:
         if (!dirtyArgs) return false;
-        value = Function.apply(fn, args);
+        value = Function.apply(fn, args, namedArgs);
         dirtyArgs = false;
         break;
-      case _MODE_FUNCTION_APPLY_:
+      case _MODE_FUNCTION_:
+        value = Function.apply(fn, args, namedArgs);
+        dirtyArgs = false;
+        break;
+      case _MODE_PURE_FUNCTION_APPLY_:
         if (!dirtyArgs) return false;
         value = (fn as FunctionApply).apply(args);
         dirtyArgs = false;
         break;
       case _MODE_FIELD_CLOSURE_:
-        var closure = _instanceMirror.getField(symbol).reflectee;
-        value = closure == null ? null : Function.apply(closure, args);
+        var closure = fn(_object);
+        value = closure == null ? null : Function.apply(closure, args, namedArgs);
         break;
       case _MODE_MAP_CLOSURE_:
         var closure = object[name];
-        value = closure == null ? null : Function.apply(closure, args);
+        value = closure == null ? null : Function.apply(closure, args, namedArgs);
         break;
       case _MODE_METHOD_:
-        value = _instanceMirror.invoke(symbol, args).reflectee;
+        value = Function.apply(fn, args, namedArgs);
+        break;
+      case _MODE_METHOD_INVOKE_:
+        value = fn(args, namedArgs);
         break;
       default:
         assert(false);
@@ -801,9 +853,5 @@ class _EvalWatchRecord implements WatchRecord<_Handler>, Record<_Handler> {
   String toString() {
     if (mode == _MODE_MARKER_) return 'MARKER[$currentValue]';
     return '${watchGrp.id}:${handler.expression}';
-  }
-
-  static bool _hasMethod(InstanceMirror mirror, Symbol symbol) {
-    return mirror.type.instanceMembers[symbol] is MethodMirror;
   }
 }

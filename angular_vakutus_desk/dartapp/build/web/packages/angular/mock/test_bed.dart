@@ -10,14 +10,14 @@ class TestBed {
   final Injector injector;
   final Scope rootScope;
   final Compiler compiler;
-  final Parser parser;
+  final Parser _parser;
   final Expando expando;
 
   Element rootElement;
   List<Node> rootElements;
   View rootView;
 
-  TestBed(this.injector, this.rootScope, this.compiler, this.parser, this.expando);
+  TestBed(this.injector, this.rootScope, this.compiler, this._parser, this.expando);
 
 
   /**
@@ -70,12 +70,12 @@ class TestBed {
   }
 
   /**
-   * Triggern a specific DOM element on a given node to test directives
+   * Trigger a specific DOM element on a given node to test directives
    * which listen to events.
    */
   triggerEvent(element, name, [type='MouseEvent']) {
     element.dispatchEvent(new Event.eventType(type, name));
-    // Since we are manually triggering event we need to simpulate apply();
+    // Since we are manually triggering event we need to simulate apply();
     rootScope.apply();
   }
 

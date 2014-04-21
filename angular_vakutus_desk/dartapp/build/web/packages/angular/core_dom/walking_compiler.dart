@@ -1,6 +1,6 @@
-part of angular.core.dom;
+part of angular.core.dom_internal;
 
-@NgInjectableService()
+@Injectable()
 class WalkingCompiler implements Compiler {
   final Profiler _perf;
   final Expando _expando;
@@ -12,19 +12,37 @@ class WalkingCompiler implements Compiler {
                                           DirectiveMap directives) {
     if (domCursor.current == null) return null;
 
-    List<ElementBinderTreeRef> elementBinders = null; // don't pre-create to create sparse tree and prevent GC pressure.
+    // don't pre-create to create sparse tree and prevent GC pressure.
+    List<ElementBinderTreeRef> elementBinders = null;
 
     do {
       var subtrees, binder;
 
-      ElementBinder elementBinder = existingElementBinder == null
-          ?  directives.selector.match(domCursor.current)
-          : existingElementBinder;
+      ElementBinder elementBinder;
+      if (existingElementBinder != null) {
+        elementBinder = existingElementBinder;
+      } else {
+        var node = domCursor.current;
+        switch(node.nodeType) {
+          case dom.Node.ELEMENT_NODE:
+            elementBinder = directives.selector.matchElement(node);
+            break;
+          case dom.Node.TEXT_NODE:
+            elementBinder = directives.selector.matchText(node);
+            break;
+          case dom.Node.COMMENT_NODE:
+            elementBinder = directives.selector.matchComment(node);
+            break;
+          default:
+            throw "Unknown node type ${node.nodeType}";
+        }
+      }
 
       if (elementBinder.hasTemplate) {
-        elementBinder.templateViewFactory = _compileTransclusion(
+        var templateBinder = elementBinder as TemplateElementBinder;
+        templateBinder.templateViewFactory = _compileTransclusion(
             domCursor, templateCursor,
-            elementBinder.template, elementBinder.templateBinder, directives);
+            templateBinder.template, templateBinder.templateBinder, directives);
       }
 
       if (elementBinder.shouldCompileChildren) {
@@ -70,17 +88,7 @@ class WalkingCompiler implements Compiler {
         elementBinders, _perf, _expando);
     domCursor.index = domCursorIndex;
 
-    if (domCursor.isInstance) {
-      domCursor.insertAnchorBefore(anchorName);
-      views = [viewFactory([domCursor.current])];
-      templateCursor.moveNext();
-      while (domCursor.moveNext() && domCursor.isInstance) {
-        views.add(viewFactory([domCursor.current]));
-        templateCursor.remove();
-      }
-    } else {
-      domCursor.replaceWithAnchor(anchorName);
-    }
+    domCursor.replaceWithAnchor(anchorName);
 
     return viewFactory;
   }

@@ -5,24 +5,28 @@ part of angular.directive;
  * on if an action is set, the form will automatically either allow
  * or prevent the default browser submission from occurring.
  */
-@NgDirective(
+@Decorator(
     selector: 'form',
-    publishTypes : const <Type>[NgControl],
-    visibility: NgDirective.CHILDREN_VISIBILITY)
-@NgDirective(
+    module: NgForm.module,
+    visibility: Directive.CHILDREN_VISIBILITY)
+@Decorator(
     selector: 'fieldset',
-    publishTypes : const <Type>[NgControl],
-    visibility: NgDirective.CHILDREN_VISIBILITY)
-@NgDirective(
+    module: NgForm.module,
+    visibility: Directive.CHILDREN_VISIBILITY)
+@Decorator(
     selector: '.ng-form',
-    publishTypes : const <Type>[NgControl],
-    visibility: NgDirective.CHILDREN_VISIBILITY)
-@NgDirective(
+    module: NgForm.module,
+    visibility: Directive.CHILDREN_VISIBILITY)
+@Decorator(
     selector: '[ng-form]',
-    publishTypes : const <Type>[NgControl],
+    module: NgForm.module,
     map: const { 'ng-form': '@name' },
-    visibility: NgDirective.CHILDREN_VISIBILITY)
+    visibility: Directive.CHILDREN_VISIBILITY)
 class NgForm extends NgControl {
+  static final Module _module = new Module()
+    ..factory(NgControl, (i) => i.get(NgForm), visibility: Directive.CHILDREN_VISIBILITY);
+  static module() => _module;
+
   final Scope _scope;
 
   /**
@@ -35,7 +39,7 @@ class NgForm extends NgControl {
    * * [element] - The form DOM element.
    * * [injector] - An instance of Injector.
    */
-  NgForm(this._scope, NgElement element, Injector injector, NgAnimate animate) :
+  NgForm(this._scope, NgElement element, Injector injector, Animate animate) :
     super(element, injector, animate) {
 
     if (!element.node.attributes.containsKey('action')) {
@@ -49,18 +53,29 @@ class NgForm extends NgControl {
     }
   }
 
+  /**
+    * The name of the control. This is usually fetched via the name attribute that is
+    * present on the element that the control is bound to.
+    */
   @NgAttr('name')
   get name => _name;
-  set name(value) {
+  set name(String value) {
     if (value != null) {
       super.name = value;
       _scope.context[name] = this;
     }
   }
 
+  /**
+    * The list of associated child controls.
+    */
   get controls => _controlByName;
 
-  NgControl operator[](name) =>
+  /**
+    * Returns the child control that is associated with the given name. If multiple
+    * child controls contain the same name then the first instance will be returned.
+    */
+  NgControl operator[](String name) =>
       controls.containsKey(name) ? controls[name][0] : null;
 }
 

@@ -1,10 +1,9 @@
 library di;
 
-import 'dart:collection';
-import 'package:collection/wrappers.dart';
+import 'src/provider.dart';
 
-part 'injector.dart';
-part 'key.dart';
-part 'module.dart';
-part 'errors.dart';
+part 'src/injector.dart';
+part 'src/module.dart';
+part 'src/errors.dart';
+part 'src/key.dart';
 

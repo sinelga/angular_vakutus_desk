@@ -1,4 +1,9 @@
-part of angular.mock;
+library angular.mock.test_injection;
+
+import 'package:angular/application_factory.dart';
+import 'package:angular/mock/module.dart';
+import 'package:di/di.dart';
+import 'package:di/dynamic_injector.dart';
 
 _SpecInjector _currentSpecInjector = null;
 
@@ -127,7 +132,9 @@ module(fnOrModule) {
 void setUpInjector() {
   _currentSpecInjector = new _SpecInjector();
   _currentSpecInjector.module((Module m) {
-    m..install(new AngularModule())..install(new AngularMockModule());
+    m
+      ..install(applicationFactory().ngModule)
+      ..install(new AngularMockModule());
   });
 }
 

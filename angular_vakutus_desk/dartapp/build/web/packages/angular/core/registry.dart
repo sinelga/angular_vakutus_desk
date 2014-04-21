@@ -1,4 +1,6 @@
-part of angular.core;
+library angular.core.registry;
+
+import 'package:di/di.dart' show Injector;
 
 abstract class AnnotationMap<K> {
   final Map<K, Type> _map = {};
@@ -68,14 +70,6 @@ abstract class AnnotationsMap<K> {
   }
 }
 
-
-@NgInjectableService()
-class MetadataExtractor {
-  Iterable call(Type type) {
-    if (reflectType(type) is TypedefMirror) return [];
-    var metadata = reflectClass(type).metadata;
-    return metadata == null
-        ? []
-        : metadata.map((InstanceMirror im) => im.reflectee);
-  }
+abstract class MetadataExtractor {
+  Iterable call(Type type);
 }

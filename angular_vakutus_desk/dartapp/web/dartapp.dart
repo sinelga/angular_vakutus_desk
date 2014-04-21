@@ -1,6 +1,7 @@
 library recipe_book;
 
 import 'package:angular/angular.dart';
+import 'package:angular/application_factory.dart';
 import 'package:dartapp/recipe_book.dart';
 import 'package:dartapp/smallarticle/smallarticle_component.dart';
 //import 'package:dartapp/bigarticle/bigarticle_component.dart';
@@ -21,7 +22,12 @@ class MyAppModule extends Module {
 }
 
 void main() {
-  ngBootstrap(module: new MyAppModule());
+//  ngBootstrap(module: new MyAppModule());
+  applicationFactory()
+        .addModule(new MyAppModule())
+        .run();
+  
+  
 }
 
 

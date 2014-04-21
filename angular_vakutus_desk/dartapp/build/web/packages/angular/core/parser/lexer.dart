@@ -1,11 +1,11 @@
 library angular.core.parser.lexer;
 
-import 'package:angular/core/module.dart' show NgInjectableService;
+import 'package:angular/core/annotation_src.dart';
 import 'package:angular/core/parser/characters.dart';
 
 part 'tokens.dart';
 
-@NgInjectableService()
+@Injectable()
 class Lexer {
   List<Token> call(String text) {
     Scanner scanner = new Scanner(text);

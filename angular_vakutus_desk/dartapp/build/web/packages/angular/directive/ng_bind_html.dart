@@ -14,20 +14,20 @@ part of angular.directive;
  *
  *     <div ng-bind-html="htmlVar"></div>
  */
-@NgDirective(
+@Decorator(
   selector: '[ng-bind-html]',
   map: const {'ng-bind-html': '=>value'})
-class NgBindHtmlDirective {
+class NgBindHtml {
   final dom.Element element;
   final dom.NodeValidator validator;
 
-  NgBindHtmlDirective(this.element, dom.NodeValidator this.validator);
+  NgBindHtml(this.element, dom.NodeValidator this.validator);
 
   /**
    * Parsed expression from the `ng-bind-html` attribute.  The result of this
    * expression is innerHTML'd according to the rules specified in this class'
    * documentation.
    */
-  set value(value) => element.setInnerHtml(value == null ? '' : value.toString(),
-                                           validator: validator);
+  void set value(value) => element.setInnerHtml(
+      value == null ? '' : value.toString(), validator: validator);
 }

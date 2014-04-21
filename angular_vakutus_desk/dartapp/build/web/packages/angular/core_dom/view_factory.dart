@@ -1,4 +1,4 @@
-part of angular.core.dom;
+part of angular.core.dom_internal;
 
 
 /**
@@ -115,16 +115,16 @@ class WalkingViewFactory implements ViewFactory {
  * It can be used synchronously if HTML is known or asynchronously if the
  * template HTML needs to be looked up from the URL.
  */
-@NgInjectableService()
+@Injectable()
 class ViewCache {
   // _viewFactoryCache is unbounded
   final _viewFactoryCache = new LruCache<String, ViewFactory>(capacity: 0);
-  final Http $http;
-  final TemplateCache $templateCache;
+  final Http http;
+  final TemplateCache templateCache;
   final Compiler compiler;
   final dom.NodeTreeSanitizer treeSanitizer;
 
-  ViewCache(this.$http, this.$templateCache, this.compiler, this.treeSanitizer);
+  ViewCache(this.http, this.templateCache, this.compiler, this.treeSanitizer);
 
   ViewFactory fromHtml(String html, DirectiveMap directives) {
     ViewFactory viewFactory = _viewFactoryCache.get(html);
@@ -138,7 +138,7 @@ class ViewCache {
   }
 
   async.Future<ViewFactory> fromUrl(String url, DirectiveMap directives) {
-    return $http.getString(url, cache: $templateCache).then(
+    return http.getString(url, cache: templateCache).then(
         (html) => fromHtml(html, directives));
   }
 }
@@ -152,9 +152,10 @@ class _ComponentFactory implements Function {
 
   final dom.Element element;
   final Type type;
-  final NgComponent component;
+  final Component component;
   final dom.NodeTreeSanitizer treeSanitizer;
   final Expando _expando;
+  final NgBaseCss _baseCss;
 
   dom.ShadowRoot shadowDom;
   Scope shadowScope;
@@ -162,10 +163,10 @@ class _ComponentFactory implements Function {
   var controller;
 
   _ComponentFactory(this.element, this.type, this.component, this.treeSanitizer,
-                    this._expando);
+                    this._expando, this._baseCss);
 
   dynamic call(Injector injector, Scope scope,
-               ViewCache $viewCache, Http $http, TemplateCache $templateCache,
+               ViewCache viewCache, Http http, TemplateCache templateCache,
                DirectiveMap directives) {
     shadowDom = element.createShadowRoot()
         ..applyAuthorStyles = component.applyAuthorStyles
@@ -178,10 +179,10 @@ class _ComponentFactory implements Function {
     // so change back to using @import once Chrome bug is fixed or a
     // better work around is found.
     List<async.Future<String>> cssFutures = new List();
-    var cssUrls = component.cssUrls;
+    var cssUrls = []..addAll(_baseCss.urls)..addAll(component.cssUrls);
     if (cssUrls.isNotEmpty) {
-      cssUrls.forEach((css) => cssFutures.add($http
-          .getString(css, cache: $templateCache)
+      cssUrls.forEach((css) => cssFutures.add(http
+          .getString(css, cache: templateCache)
           .catchError((e) => '/*\n$e\n*/\n')
       ));
     } else {
@@ -189,17 +190,20 @@ class _ComponentFactory implements Function {
     }
     var viewFuture;
     if (component.template != null) {
-      viewFuture = new async.Future.value($viewCache.fromHtml(
+      viewFuture = new async.Future.value(viewCache.fromHtml(
           component.template, directives));
     } else if (component.templateUrl != null) {
-      viewFuture = $viewCache.fromUrl(component.templateUrl, directives);
+      viewFuture = viewCache.fromUrl(component.templateUrl, directives);
     }
     TemplateLoader templateLoader = new TemplateLoader(
         async.Future.wait(cssFutures).then((Iterable<String> cssList) {
           if (cssList != null) {
-            var filteredCssList = cssList.where((css) => css != null );
-            shadowDom.setInnerHtml('<style>${filteredCssList.join('')}</style>',
-            treeSanitizer: treeSanitizer);
+            shadowDom.setInnerHtml(
+              cssList
+                .where((css) => css != null)
+                .map((css) => '<style>$css</style>')
+                .join(''),
+              treeSanitizer: treeSanitizer);
           }
           if (viewFuture != null) {
             return viewFuture.then((ViewFactory viewFactory) {
@@ -211,10 +215,10 @@ class _ComponentFactory implements Function {
           return shadowDom;
         }));
     controller = createShadowInjector(injector, templateLoader).get(type);
-    if (controller is NgShadowRootAware) {
+    if (controller is ShadowRootAware) {
       templateLoader.template.then((_) {
         if (!shadowScope.isAttached) return;
-        (controller as NgShadowRootAware).onShadowRoot(shadowDom);
+        (controller as ShadowRootAware).onShadowRoot(shadowDom);
       });
     }
     return controller;
@@ -231,12 +235,12 @@ class _ComponentFactory implements Function {
     var shadowModule = new Module()
         ..type(type)
         ..type(NgElement)
-        ..type(EventHandler, implementedBy: _ShadowRootEventHandler)
+        ..type(EventHandler, implementedBy: ShadowRootEventHandler)
         ..value(Scope, shadowScope)
         ..value(TemplateLoader, templateLoader)
         ..value(dom.ShadowRoot, shadowDom)
         ..factory(ElementProbe, (_) => probe);
-    shadowInjector = injector.createChild([shadowModule], name: _SHADOW);
+    shadowInjector = injector.createChild([shadowModule], name: SHADOW_DOM_INJECTOR_NAME);
     probe = _expando[shadowDom] = new ElementProbe(
         injector.get(ElementProbe), shadowDom, shadowInjector, shadowScope);
     return shadowInjector;
@@ -248,14 +252,12 @@ class _AnchorAttrs extends NodeAttrs {
 
   _AnchorAttrs(DirectiveRef this._directiveRef): super(null);
 
-  operator [](name) => name == '.' ? _directiveRef.value : null;
+  String operator [](name) => name == '.' ? _directiveRef.value : null;
 
-  void observe(String attributeName, AttributeChanged notifyFn) {
+  void observe(String attributeName, _AttributeChanged notifyFn) {
     notifyFn(attributeName == '.' ? _directiveRef.value : null);
   }
 }
-
-String _SHADOW = 'SHADOW_INJECTOR';
 
 String _html(obj) {
   if (obj is String) {

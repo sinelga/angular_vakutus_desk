@@ -7,7 +7,7 @@ import "package:jsonp/jsonp.dart" as jsonp;
 import "package:dartapp/domains.dart";
 import 'package:intl/intl.dart';
 
-@NgController(
+@Controller(
     selector: '[recipe-book]',
     publishAs: 'ctrl')
 class RecipeBookController {

@@ -10,14 +10,13 @@ library engine.source.io;
 import 'source.dart';
 import 'java_core.dart';
 import 'java_io.dart';
-import 'engine.dart' show AnalysisContext, AnalysisEngine;
+import 'utilities_general.dart';
+import 'engine.dart';
 export 'source.dart';
 
 /**
  * Instances of interface `LocalSourcePredicate` are used to determine if the given
  * [Source] is "local" in some sense, so can be updated.
- *
- * @coverage dart.engine.source
  */
 abstract class LocalSourcePredicate {
   /**
@@ -46,33 +45,28 @@ abstract class LocalSourcePredicate {
 }
 
 class LocalSourcePredicate_FALSE implements LocalSourcePredicate {
+  @override
   bool isLocal(Source source) => false;
 }
 
 class LocalSourcePredicate_TRUE implements LocalSourcePredicate {
+  @override
   bool isLocal(Source source) => true;
 }
 
 class LocalSourcePredicate_NOT_SDK implements LocalSourcePredicate {
+  @override
   bool isLocal(Source source) => source.uriKind != UriKind.DART_URI;
 }
 
 /**
  * Instances of the class `FileBasedSource` implement a source that represents a file.
- *
- * @coverage dart.engine.source
  */
 class FileBasedSource implements Source {
   /**
-   * The content cache used to access the contents of this source if they have been overridden from
-   * what is on disk or cached.
-   */
-  ContentCache _contentCache;
-
-  /**
    * The file represented by this source.
    */
-  JavaFile _file;
+  final JavaFile file;
 
   /**
    * The cached encoding for this source.
@@ -82,113 +76,194 @@ class FileBasedSource implements Source {
   /**
    * The kind of URI from which this source was originally derived.
    */
-  UriKind _uriKind;
+  final UriKind uriKind;
 
   /**
    * Initialize a newly created source object. The source object is assumed to not be in a system
    * library.
    *
-   * @param contentCache the content cache used to access the contents of this source
    * @param file the file represented by this source
    */
-  FileBasedSource.con1(ContentCache contentCache, JavaFile file) : this.con2(contentCache, file, UriKind.FILE_URI);
+  FileBasedSource.con1(JavaFile file) : this.con2(file, UriKind.FILE_URI);
 
   /**
    * Initialize a newly created source object.
    *
-   * @param contentCache the content cache used to access the contents of this source
    * @param file the file represented by this source
    * @param flags `true` if this source is in one of the system libraries
    */
-  FileBasedSource.con2(ContentCache contentCache, JavaFile file, UriKind uriKind) {
-    this._contentCache = contentCache;
-    this._file = file;
-    this._uriKind = uriKind;
-  }
+  FileBasedSource.con2(this.file, this.uriKind);
 
-  bool operator ==(Object object) => object != null && this.runtimeType == object.runtimeType && _file == (object as FileBasedSource)._file;
+  @override
+  bool operator ==(Object object) => object != null && this.runtimeType == object.runtimeType && file == (object as FileBasedSource).file;
 
-  bool exists() => _contentCache.getContents(this) != null || _file.isFile();
+  @override
+  bool exists() => file.isFile();
 
-  void getContents(Source_ContentReceiver receiver) {
-    //
-    // First check to see whether our content cache has an override for our contents.
-    //
-    String contents = _contentCache.getContents(this);
-    if (contents != null) {
-      receiver.accept(contents, _contentCache.getModificationStamp(this));
-      return;
+  @override
+  TimestampedData<String> get contents {
+    TimeCounter_TimeCounterHandle handle = PerformanceStatistics.io.start();
+    try {
+      return contentsFromFile;
+    } finally {
+      handle.stop();
     }
-    //
-    // If not, read the contents from the file using native I/O.
-    //
-    getContentsFromFile(receiver);
   }
 
+  @override
   String get encoding {
     if (_encoding == null) {
-      _encoding = "${_uriKind.encoding}${_file.toURI().toString()}";
+      _encoding = "${uriKind.encoding}${file.toURI().toString()}";
     }
     return _encoding;
   }
 
-  String get fullName => _file.getAbsolutePath();
+  @override
+  String get fullName => file.getAbsolutePath();
 
-  int get modificationStamp {
-    int stamp = _contentCache.getModificationStamp(this);
-    if (stamp != null) {
-      return stamp;
-    }
-    return _file.lastModified();
-  }
+  @override
+  int get modificationStamp => file.lastModified();
 
-  String get shortName => _file.getName();
+  @override
+  String get shortName => file.getName();
 
-  UriKind get uriKind => _uriKind;
+  @override
+  int get hashCode => file.hashCode;
 
-  int get hashCode => _file.hashCode;
+  @override
+  bool get isInSystemLibrary => uriKind == UriKind.DART_URI;
 
-  bool get isInSystemLibrary => identical(_uriKind, UriKind.DART_URI);
-
+  @override
   Source resolveRelative(Uri containedUri) {
     try {
       Uri resolvedUri = file.toURI().resolveUri(containedUri);
-      return new FileBasedSource.con2(_contentCache, new JavaFile.fromUri(resolvedUri), _uriKind);
+      return new FileBasedSource.con2(new JavaFile.fromUri(resolvedUri), uriKind);
     } on JavaException catch (exception) {
     }
     return null;
   }
 
+  @override
   String toString() {
-    if (_file == null) {
+    if (file == null) {
       return "<unknown source>";
     }
-    return _file.getAbsolutePath();
+    return file.getAbsolutePath();
   }
 
   /**
-   * Get the contents of underlying file and pass it to the given receiver. Exactly one of the
-   * methods defined on the receiver will be invoked unless an exception is thrown. The method that
-   * will be invoked depends on which of the possible representations of the contents is the most
-   * efficient. Whichever method is invoked, it will be invoked before this method returns.
+   * Get the contents and timestamp of the underlying file.
    *
-   * @param receiver the content receiver to which the content of this source will be passed
+   * Clients should consider using the the method [AnalysisContext#getContents]
+   * because contexts can have local overrides of the content of a source that the source is not
+   * aware of.
+   *
+   * @return the contents of the source paired with the modification stamp of the source
    * @throws Exception if the contents of this source could not be accessed
-   * @see #getContents(com.google.dart.engine.source.Source.ContentReceiver)
+   * @see #getContents()
    */
-  void getContentsFromFile(Source_ContentReceiver receiver) {
-    {
-    }
-    receiver.accept(file.readAsStringSync(), file.lastModified());
+  TimestampedData<String> get contentsFromFile {
+    return new TimestampedData<String>(file.lastModified(), file.readAsStringSync());
+  }
+}
+
+/**
+ * An implementation of an non-existing [Source].
+ */
+class NonExistingSource implements Source {
+  final String _name;
+
+  final UriKind uriKind;
+
+  NonExistingSource(this._name, this.uriKind);
+
+  @override
+  bool exists() => false;
+
+  @override
+  TimestampedData<String> get contents {
+    throw new UnsupportedOperationException("${_name}does not exist.");
   }
 
+  @override
+  String get encoding {
+    throw new UnsupportedOperationException("${_name}does not exist.");
+  }
+
+  @override
+  String get fullName => _name;
+
+  @override
+  int get modificationStamp => 0;
+
+  @override
+  String get shortName => _name;
+
+  @override
+  bool get isInSystemLibrary => false;
+
+  @override
+  Source resolveRelative(Uri relativeUri) {
+    throw new UnsupportedOperationException("${_name}does not exist.");
+  }
+}
+
+/**
+ * Instances of the class `RelativeFileUriResolver` resolve `file` URI's.
+ */
+class RelativeFileUriResolver extends UriResolver {
   /**
-   * Return the file represented by this source. This is an internal method that is only intended to
-   * be used by [UriResolver].
-   *
-   * @return the file represented by this source
+   * The name of the `file` scheme.
    */
-  JavaFile get file => _file;
+  static String FILE_SCHEME = "file";
+
+  /**
+   * Return `true` if the given URI is a `file` URI.
+   *
+   * @param uri the URI being tested
+   * @return `true` if the given URI is a `file` URI
+   */
+  static bool isFileUri(Uri uri) => uri.scheme == FILE_SCHEME;
+
+  /**
+   * The directories for the relatvie URI's
+   */
+  final List<JavaFile> _relativeDirectories;
+
+  /**
+   * The root directory for all the source trees
+   */
+  final JavaFile _rootDirectory;
+
+  /**
+   * Initialize a newly created resolver to resolve `file` URI's relative to the given root
+   * directory.
+   */
+  RelativeFileUriResolver(this._rootDirectory, this._relativeDirectories) : super();
+
+  @override
+  Source fromEncoding(UriKind kind, Uri uri) {
+    if (kind == UriKind.FILE_URI) {
+      return new FileBasedSource.con2(new JavaFile.fromUri(uri), kind);
+    }
+    return null;
+  }
+
+  @override
+  Source resolveAbsolute(Uri uri) {
+    String rootPath = _rootDirectory.toURI().path;
+    String uriPath = uri.path;
+    if (uriPath != null && uriPath.startsWith(rootPath)) {
+      String filePath = uri.path.substring(rootPath.length);
+      for (JavaFile dir in _relativeDirectories) {
+        JavaFile file = new JavaFile.relative(dir, filePath);
+        if (file.exists()) {
+          return new FileBasedSource.con2(file, UriKind.FILE_URI);
+        }
+      }
+    }
+    return null;
+  }
 }
 
 /**
@@ -198,14 +273,12 @@ class FileBasedSource implements Source {
  * For the purposes of sharing analysis, the path to each package under the "packages" directory
  * should be canonicalized, but to preserve relative links within a package, the remainder of the
  * path from the package directory to the leaf should not.
- *
- * @coverage dart.engine.source
  */
 class PackageUriResolver extends UriResolver {
   /**
    * The package directories that `package` URI's are assumed to be relative to.
    */
-  List<JavaFile> _packagesDirectories;
+  final List<JavaFile> _packagesDirectories;
 
   /**
    * The name of the `package` scheme.
@@ -232,21 +305,22 @@ class PackageUriResolver extends UriResolver {
    * @param packagesDirectories the package directories that `package` URI's are assumed to be
    *          relative to
    */
-  PackageUriResolver(List<JavaFile> packagesDirectories) {
-    if (packagesDirectories.length < 1) {
+  PackageUriResolver(this._packagesDirectories) {
+    if (_packagesDirectories.length < 1) {
       throw new IllegalArgumentException("At least one package directory must be provided");
     }
-    this._packagesDirectories = packagesDirectories;
   }
 
-  Source fromEncoding(ContentCache contentCache, UriKind kind, Uri uri) {
-    if (identical(kind, UriKind.PACKAGE_SELF_URI) || identical(kind, UriKind.PACKAGE_URI)) {
-      return new FileBasedSource.con2(contentCache, new JavaFile.fromUri(uri), kind);
+  @override
+  Source fromEncoding(UriKind kind, Uri uri) {
+    if (kind == UriKind.PACKAGE_SELF_URI || kind == UriKind.PACKAGE_URI) {
+      return new FileBasedSource.con2(new JavaFile.fromUri(uri), kind);
     }
     return null;
   }
 
-  Source resolveAbsolute(ContentCache contentCache, Uri uri) {
+  @override
+  Source resolveAbsolute(Uri uri) {
     if (!isPackageUri(uri)) {
       return null;
     }
@@ -276,13 +350,14 @@ class PackageUriResolver extends UriResolver {
       JavaFile resolvedFile = new JavaFile.relative(packagesDirectory, path);
       if (resolvedFile.exists()) {
         JavaFile canonicalFile = getCanonicalFile(packagesDirectory, pkgName, relPath);
-        UriKind uriKind = isSelfReference(packagesDirectory, canonicalFile) ? UriKind.PACKAGE_SELF_URI : UriKind.PACKAGE_URI;
-        return new FileBasedSource.con2(contentCache, canonicalFile, uriKind);
+        UriKind uriKind = _isSelfReference(packagesDirectory, canonicalFile) ? UriKind.PACKAGE_SELF_URI : UriKind.PACKAGE_URI;
+        return new FileBasedSource.con2(canonicalFile, uriKind);
       }
     }
-    return new FileBasedSource.con2(contentCache, getCanonicalFile(_packagesDirectories[0], pkgName, relPath), UriKind.PACKAGE_URI);
+    return new FileBasedSource.con2(getCanonicalFile(_packagesDirectories[0], pkgName, relPath), UriKind.PACKAGE_URI);
   }
 
+  @override
   Uri restoreAbsolute(Source source) {
     if (source is FileBasedSource) {
       String sourcePath = source.file.getPath();
@@ -333,7 +408,7 @@ class PackageUriResolver extends UriResolver {
    * @return `true` if "file" was found in "packagesDir", and it is part of the "lib" folder
    *         of the application that contains in this "packagesDir".
    */
-  bool isSelfReference(JavaFile packagesDir, JavaFile file) {
+  bool _isSelfReference(JavaFile packagesDir, JavaFile file) {
     JavaFile rootDir = packagesDir.getParentFile();
     if (rootDir == null) {
       return false;
@@ -347,8 +422,6 @@ class PackageUriResolver extends UriResolver {
 /**
  * Instances of the class [DirectoryBasedSourceContainer] represent a source container that
  * contains all sources within a given directory.
- *
- * @coverage dart.engine.source
  */
 class DirectoryBasedSourceContainer implements SourceContainer {
   /**
@@ -358,7 +431,7 @@ class DirectoryBasedSourceContainer implements SourceContainer {
    * @param path the path to which the file separator is to be added
    * @return a path that ends with the system file separator
    */
-  static String appendFileSeparator(String path) {
+  static String _appendFileSeparator(String path) {
     if (path == null || path.length <= 0 || path.codeUnitAt(path.length - 1) == JavaFile.separatorChar) {
       return path;
     }
@@ -387,11 +460,13 @@ class DirectoryBasedSourceContainer implements SourceContainer {
    * @param path the path (not `null` and not empty)
    */
   DirectoryBasedSourceContainer.con2(String path) {
-    this._path = appendFileSeparator(path);
+    this._path = _appendFileSeparator(path);
   }
 
+  @override
   bool contains(Source source) => source.fullName.startsWith(_path);
 
+  @override
   bool operator ==(Object obj) => (obj is DirectoryBasedSourceContainer) && obj.path == path;
 
   /**
@@ -401,15 +476,15 @@ class DirectoryBasedSourceContainer implements SourceContainer {
    */
   String get path => _path;
 
+  @override
   int get hashCode => _path.hashCode;
 
+  @override
   String toString() => "SourceContainer[${_path}]";
 }
 
 /**
  * Instances of the class `FileUriResolver` resolve `file` URI's.
- *
- * @coverage dart.engine.source
  */
 class FileUriResolver extends UriResolver {
   /**
@@ -425,17 +500,19 @@ class FileUriResolver extends UriResolver {
    */
   static bool isFileUri(Uri uri) => uri.scheme == FILE_SCHEME;
 
-  Source fromEncoding(ContentCache contentCache, UriKind kind, Uri uri) {
-    if (identical(kind, UriKind.FILE_URI)) {
-      return new FileBasedSource.con2(contentCache, new JavaFile.fromUri(uri), kind);
+  @override
+  Source fromEncoding(UriKind kind, Uri uri) {
+    if (kind == UriKind.FILE_URI) {
+      return new FileBasedSource.con2(new JavaFile.fromUri(uri), kind);
     }
     return null;
   }
 
-  Source resolveAbsolute(ContentCache contentCache, Uri uri) {
+  @override
+  Source resolveAbsolute(Uri uri) {
     if (!isFileUri(uri)) {
       return null;
     }
-    return new FileBasedSource.con1(contentCache, new JavaFile.fromUri(uri));
+    return new FileBasedSource.con1(new JavaFile.fromUri(uri));
   }
 }

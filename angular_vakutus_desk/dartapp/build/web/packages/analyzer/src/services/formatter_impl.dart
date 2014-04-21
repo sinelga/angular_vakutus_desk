@@ -147,7 +147,7 @@ class CodeFormatterImpl implements CodeFormatter, AnalysisErrorListener {
       new TokenStreamComparator(lineInfo, t1, t2, transforms: allowTransforms).
           verifyEquals();
 
-  ASTNode parse(CodeKind kind, Token start) {
+  AstNode parse(CodeKind kind, Token start) {
 
     var parser = new Parser(null, this);
 
@@ -302,15 +302,12 @@ class TokenStreamComparator {
 
 }
 
-// Cached parser for testing token types.
-final tokenTester = new Parser(null,null);
+/// Test for token type.
+bool tokenIs(Token token, TokenType type) =>
+    token != null && token.type == type;
 
 /// Test if this token is an EOF token.
 bool isEOF(Token token) => tokenIs(token, TokenType.EOF);
-
-/// Test for token type.
-bool tokenIs(Token token, TokenType type) =>
-    token != null && tokenTester.matches4(token, type);
 
 /// Test if this token is a GT token.
 bool isGT(Token token) => tokenIs(token, TokenType.GT);
@@ -343,7 +340,7 @@ bool isSEMICOLON(Token token) =>
 
 
 /// An AST visitor that drives formatting heuristics.
-class SourceVisitor implements ASTVisitor {
+class SourceVisitor implements AstVisitor {
 
   static final OPEN_CURLY = syntheticToken(TokenType.OPEN_CURLY_BRACKET, '{');
   static final CLOSE_CURLY = syntheticToken(TokenType.CLOSE_CURLY_BRACKET, '}');
@@ -533,7 +530,7 @@ class SourceVisitor implements ASTVisitor {
 
   visitClassDeclaration(ClassDeclaration node) {
     preserveLeadingNewlines();
-    visitNodes(node.metadata, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     modifier(node.abstractKeyword);
     token(node.classKeyword);
     space();
@@ -559,7 +556,7 @@ class SourceVisitor implements ASTVisitor {
 
   visitClassTypeAlias(ClassTypeAlias node) {
     preserveLeadingNewlines();
-    visitNodes(node.metadata, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     modifier(node.abstractKeyword);
     token(node.keyword);
     space();
@@ -618,7 +615,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitConstructorDeclaration(ConstructorDeclaration node) {
-    visitNodes(node.metadata, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     modifier(node.externalKeyword);
     modifier(node.constKeyword);
     modifier(node.factoryKeyword);
@@ -653,6 +650,7 @@ class SourceVisitor implements ASTVisitor {
       newlines();
     } else {
       preserveLeadingNewlines();
+      space();
     }
     indent(2);
     token(node.separator /* : */);
@@ -745,7 +743,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitExportDirective(ExportDirective node) {
-    visitNodes(node.metadata, followedBy: newlines);
+    visitDirectiveMetadata(node.metadata);
     token(node.keyword);
     space();
     visit(node.uri);
@@ -774,7 +772,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitFieldDeclaration(FieldDeclaration node) {
-    visitNodes(node.metadata, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     modifier(node.staticKeyword);
     visit(node.fields);
     token(node.semicolon);
@@ -864,7 +862,7 @@ class SourceVisitor implements ASTVisitor {
 
   visitFunctionDeclaration(FunctionDeclaration node) {
     preserveLeadingNewlines();
-    visitNodes(node.metadata, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     modifier(node.externalKeyword);
     visitNode(node.returnType, followedBy: space);
     modifier(node.propertyKeyword);
@@ -890,7 +888,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitFunctionTypeAlias(FunctionTypeAlias node) {
-    visitNodes(node.metadata, separatedBy: newlines, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     token(node.keyword);
     space();
     visitNode(node.returnType, followedBy: space);
@@ -927,7 +925,11 @@ class SourceVisitor implements ASTVisitor {
       space();
       token(node.elseKeyword);
       space();
-      printAsBlock(node.elseStatement);
+      if (node.elseStatement is IfStatement) {
+        visit(node.elseStatement);
+      } else {
+        printAsBlock(node.elseStatement);
+      }
     } else {
       visit(node.thenStatement);
     }
@@ -940,7 +942,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitImportDirective(ImportDirective node) {
-    visitNodes(node.metadata, followedBy: newlines);
+    visitDirectiveMetadata(node.metadata);
     token(node.keyword);
     nonBreakingSpace();
     visit(node.uri);
@@ -1009,7 +1011,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitLibraryDirective(LibraryDirective node) {
-    visitNodes(node.metadata, followedBy: newlines);
+    visitDirectiveMetadata(node.metadata);
     token(node.keyword);
     space();
     visit(node.name);
@@ -1053,7 +1055,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitMethodDeclaration(MethodDeclaration node) {
-    visitNodes(node.metadata, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     modifier(node.externalKeyword);
     modifier(node.modifierKeyword);
     visitNode(node.returnType, followedBy: space);
@@ -1180,7 +1182,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitSimpleFormalParameter(SimpleFormalParameter node) {
-    visitNodes(node.metadata, followedBy: space);
+    visitMemberMetadata(node.metadata);
     modifier(node.keyword);
     visitNode(node.type, followedBy: space);
     visit(node.identifier);
@@ -1303,7 +1305,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitTypeParameter(TypeParameter node) {
-    visitNodes(node.metadata, followedBy: space);
+    visitMemberMetadata(node.metadata);
     visit(node.name);
     token(node.keyword /* extends */, precededBy: space, followedBy: space);
     visit(node.bound);
@@ -1334,7 +1336,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   visitVariableDeclarationList(VariableDeclarationList node) {
-    visitNodes(node.metadata, followedBy: newlines);
+    visitMemberMetadata(node.metadata);
     modifier(node.keyword);
     visitNode(node.type, followedBy: space);
 
@@ -1391,10 +1393,28 @@ class SourceVisitor implements ASTVisitor {
   }
 
   /// Safely visit the given [node].
-  visit(ASTNode node) {
+  visit(AstNode node) {
     if (node != null) {
       node.accept(this);
     }
+  }
+
+  /// Visit member metadata
+  visitMemberMetadata(NodeList<Annotation> metadata) {
+    visitNodes(metadata,
+      separatedBy: () {
+        space();
+        preserveLeadingNewlines();
+      },
+      followedBy: space);
+    if (metadata != null && metadata.length > 0) {
+      preserveLeadingNewlines();
+    }
+  }
+
+  /// Visit member metadata
+  visitDirectiveMetadata(NodeList<Annotation> metadata) {
+    visitNodes(metadata, separatedBy: newlines, followedBy: newlines);
   }
 
   /// Visit the given function [body], printing the [prefix] before if given
@@ -1408,7 +1428,7 @@ class SourceVisitor implements ASTVisitor {
 
   /// Visit a list of [nodes] if not null, optionally separated and/or preceded
   /// and followed by the given functions.
-  visitNodes(NodeList<ASTNode> nodes, {precededBy(): null,
+  visitNodes(NodeList<AstNode> nodes, {precededBy(): null,
       separatedBy() : null, followedBy(): null}) {
     if (nodes != null) {
       var size = nodes.length;
@@ -1430,7 +1450,7 @@ class SourceVisitor implements ASTVisitor {
   }
 
   /// Visit a comma-separated list of [nodes] if not null.
-  visitCommaSeparatedNodes(NodeList<ASTNode> nodes, {followedBy(): null}) {
+  visitCommaSeparatedNodes(NodeList<AstNode> nodes, {followedBy(): null}) {
     //TODO(pquitslund): handle this more neatly
     if (followedBy == null) {
       followedBy = space;
@@ -1455,7 +1475,7 @@ class SourceVisitor implements ASTVisitor {
 
   /// Visit a [node], and if not null, optionally preceded or followed by the
   /// specified functions.
-  visitNode(ASTNode node, {precededBy(): null, followedBy(): null}) {
+  visitNode(AstNode node, {precededBy(): null, followedBy(): null}) {
     if (node != null) {
       if (precededBy != null) {
         precededBy();
@@ -1693,15 +1713,15 @@ class SourceVisitor implements ASTVisitor {
       countNewlinesBetween(last, current) > 0 ? 0 : current.offset - last.end;
 
   /// Count the blanks between these two nodes.
-  int countBlankLinesBetween(ASTNode lastNode, ASTNode currentNode) =>
+  int countBlankLinesBetween(AstNode lastNode, AstNode currentNode) =>
       countNewlinesBetween(lastNode.endToken, currentNode.beginToken);
 
   /// Count newlines preceeding this [node].
-  int countPrecedingNewlines(ASTNode node) =>
+  int countPrecedingNewlines(AstNode node) =>
       countNewlinesBetween(node.beginToken.previous, node.beginToken);
 
   /// Count newlines succeeding this [node].
-  int countSucceedingNewlines(ASTNode node) => node == null ? 0 :
+  int countSucceedingNewlines(AstNode node) => node == null ? 0 :
       countNewlinesBetween(node.endToken, node.endToken.next);
 
   /// Count the blanks between these two tokens.

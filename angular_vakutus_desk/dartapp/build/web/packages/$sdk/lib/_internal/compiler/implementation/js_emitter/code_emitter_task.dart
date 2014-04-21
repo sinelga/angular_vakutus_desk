@@ -842,7 +842,7 @@ class CodeEmitterTask extends CompilerTask {
   }
 
   void emitStaticNonFinalFieldInitializations(CodeBuffer buffer) {
-    ConstantHandler handler = compiler.constantHandler;
+    JavaScriptConstantCompiler handler = backend.constants;
     Iterable<VariableElement> staticNonFinalFields =
         handler.getStaticNonFinalFieldsForEmission();
     for (Element element in Elements.sortedByPosition(staticNonFinalFields)) {
@@ -862,7 +862,7 @@ class CodeEmitterTask extends CompilerTask {
   }
 
   void emitLazilyInitializedStaticFields(CodeBuffer buffer) {
-    ConstantHandler handler = compiler.constantHandler;
+    JavaScriptConstantCompiler handler = backend.constants;
     List<VariableElement> lazyFields =
         handler.getLazilyInitializedFieldsForEmission();
     if (!lazyFields.isEmpty) {
@@ -901,7 +901,7 @@ class CodeEmitterTask extends CompilerTask {
   }
 
   void emitCompileTimeConstants(CodeBuffer buffer, OutputUnit outputUnit) {
-    ConstantHandler handler = compiler.constantHandler;
+    JavaScriptConstantCompiler handler = backend.constants;
     List<Constant> constants = handler.getConstantsForEmission(
         compareConstants);
     Set<Constant> outputUnitConstants = null;
@@ -948,6 +948,13 @@ class CodeEmitterTask extends CompilerTask {
     int cmp1 = isConstantInlinedOrAlreadyEmitted(a) ? 0 : 1;
     int cmp2 = isConstantInlinedOrAlreadyEmitted(b) ? 0 : 1;
     if (cmp1 + cmp2 < 2) return cmp1 - cmp2;
+
+    // Emit constant interceptors first. Constant intercpetors for primitives
+    // might be used by code that builds other constants.  See Issue 19183.
+    if (a.isInterceptor != b.isInterceptor) {
+      return a.isInterceptor ? -1 : 1;
+    }
+
     // Sorting by the long name clusters constants with the same constructor
     // which compresses a tiny bit better.
     int r = namer.constantLongName(a).compareTo(namer.constantLongName(b));
@@ -1439,17 +1446,22 @@ mainBuffer.add(r'''
       // [emitOneShotInterceptors] have been called.
       emitCompileTimeConstants(mainBuffer, mainOutputUnit);
 
-      // We write a javascript mapping from DeferredLibrary elements
-      // (really their String argument) to the js hunk to load.
+      // Write a javascript mapping from Deferred import load ids (derrived from
+      // the import prefix.) to a list of lists of js hunks to load.
       // TODO(sigurdm): Create a syntax tree for this.
       // TODO(sigurdm): Also find out where to place it.
       mainBuffer.write("\$.libraries_to_load = {");
-      for (String constant in compiler.deferredLoadTask.hunksToLoad.keys) {
+      for (String loadId in compiler.deferredLoadTask.hunksToLoad.keys) {
         // TODO(sigurdm): Escape these strings.
-        mainBuffer.write('"$constant":[');
-        for (OutputUnit outputUnit in
-            compiler.deferredLoadTask.hunksToLoad[constant]) {
-          mainBuffer.write('"${outputUnit.partFileName(compiler)}.part.js", ');
+        mainBuffer.write('"$loadId":[');
+        for (List<OutputUnit> outputUnits in
+            compiler.deferredLoadTask.hunksToLoad[loadId]) {
+          mainBuffer.write("[");
+          for (OutputUnit outputUnit in outputUnits) {
+            mainBuffer
+              .write('"${outputUnit.partFileName(compiler)}.part.js", ');
+          }
+          mainBuffer.write("],");
         }
         mainBuffer.write("],\n");
       }
@@ -1530,6 +1542,14 @@ if (typeof $printHelperName === "function") {
       } else {
         mainBuffer.add('\n');
       }
+
+      if (compiler.useContentSecurityPolicy) {
+        mainBuffer.write(
+            jsAst.prettyPrint(
+                precompiledFunctionAst, compiler,
+                allowVariableMinification: false).getText());
+      }
+
       String assembledCode = mainBuffer.getText();
       String sourceMapTags = "";
       if (generateSourceMap) {
@@ -1544,15 +1564,31 @@ if (typeof $printHelperName === "function") {
           ..close();
       compiler.assembledCode = assembledCode;
 
-      mainBuffer.write(
-          jsAst.prettyPrint(
-              precompiledFunctionAst, compiler,
-              allowVariableMinification: false).getText());
+      if (!compiler.useContentSecurityPolicy) {
+        mainBuffer.write("""
+{
+  var message = 
+      'Deprecation: Automatic generation of output for Content Security\\n' +
+      'Policy is deprecated and will be removed with the next development\\n' +
+      'release. Use the --csp option to generate CSP restricted output.';
+  if (typeof dartPrint == "function") {
+    dartPrint(message);
+  } else if (typeof console == "object" && typeof console.log == "function") {
+    console.log(message);
+  } else if (typeof print == "function") {
+    print(message);
+  }
+}\n""");
 
-      compiler.outputProvider('', 'precompiled.js')
-          ..add(mainBuffer.getText())
-          ..close();
+        mainBuffer.write(
+            jsAst.prettyPrint(
+                precompiledFunctionAst, compiler,
+                allowVariableMinification: false).getText());
 
+        compiler.outputProvider('', 'precompiled.js')
+            ..add(mainBuffer.getText())
+            ..close();
+      }
       emitDeferredCode();
 
     });
@@ -1672,9 +1708,9 @@ if (typeof $printHelperName === "function") {
     // [:getLine:] to transform offsets to line numbers in [SourceMapBuilder].
     SourceFile compiledFile = new StringSourceFile(null, code);
     SourceMapBuilder sourceMapBuilder =
-            new SourceMapBuilder(sourceMapUri, fileUri);
+            new SourceMapBuilder(sourceMapUri, fileUri, compiledFile);
     buffer.forEachSourceLocation(sourceMapBuilder.addMapping);
-    String sourceMap = sourceMapBuilder.build(compiledFile);
+    String sourceMap = sourceMapBuilder.build();
     compiler.outputProvider(name, 'js.map')
         ..add(sourceMap)
         ..close();

@@ -1,17 +1,18 @@
 library angular.core.parser;
 
+import 'package:angular/core/parser/syntax.dart'
+   show CallArguments;
 export 'package:angular/core/parser/syntax.dart'
-   show Visitor, Expression, BoundExpression;
+   show Visitor, Expression, BoundExpression, CallArguments;
 export 'package:angular/core/parser/dynamic_parser.dart'
    show DynamicParser, DynamicParserBackend, ClosureMap;
-export 'package:angular/core/parser/static_parser.dart'
-    show StaticParser, StaticParserFunctions;
 
 typedef LocalsWrapper(context, locals);
 typedef Getter(self);
 typedef Setter(self, value);
 typedef BoundGetter([locals]);
 typedef BoundSetter(value, [locals]);
+typedef MethodClosure(obj, List posArgs, Map namedArgs);
 
 /// Placeholder for DI. The parser you are looking for is [DynamicParser].
 abstract class Parser<T> {
@@ -31,14 +32,14 @@ abstract class ParserBackend<T> {
   T newAccessMember(T object, String name) => null;
   T newAccessKeyed(T object, T key) => null;
 
-  T newCallScope(String name, List arguments) => null;
-  T newCallFunction(T function, List arguments) => null;
-  T newCallMember(T object, String name, List arguments) => null;
+  T newCallScope(String name, CallArguments arguments) => null;
+  T newCallFunction(T function, CallArguments arguments) => null;
+  T newCallMember(T object, String name, CallArguments arguments) => null;
 
   T newPrefix(String operation, T expression) => null;
   T newPrefixPlus(T expression) => expression;
-  T newPrefixMinus(T expression)
-      => newBinaryMinus(newLiteralZero(), expression);
+  T newPrefixMinus(T expression) =>
+      newBinaryMinus(newLiteralZero(), expression);
   T newPrefixNot(T expression) => newPrefix('!', expression);
 
   T newBinary(String operation, T left, T right) => null;
